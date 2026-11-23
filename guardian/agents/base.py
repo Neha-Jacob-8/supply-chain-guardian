@@ -104,14 +104,14 @@ class Agent:
 
     def run(self, state, llm, **kw):
         """LLM mode when available; otherwise the deterministic fallback (clearly labelled)."""
-        if llm is not None:
+        for provider in (getattr(llm, "providers", None) or ([llm] if llm is not None else [])):
             try:
-                res = self.run_llm(state, llm, self.task(state, **kw))
+                res = self.run_llm(state, provider, self.task(state, **kw))
                 if res is not None:
-                    return {**res, "mode": f"llm:{llm.name}"}
-                state.log(self.name, "fallback", {"reason": "no accepted result from LLM"})
+                    return {**res, "mode": f"llm:{provider.name}"}
+                state.log(self.name, "provider_fallback", {"provider": provider.name, "reason": "no accepted result"})
             except Exception as e:
-                state.log(self.name, "fallback", {"reason": f"{type(e).__name__}: {e}"})
+                state.log(self.name, "provider_fallback", {"provider": provider.name, "reason": f"{type(e).__name__}: {e}"})
         return {**self.fallback(state, **kw), "mode": "rule-based (no LLM)"}
 
     def task(self, state, **kw):

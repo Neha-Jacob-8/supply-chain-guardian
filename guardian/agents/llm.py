@@ -98,10 +98,33 @@ class ScriptedLLM:
         return Step("tool_use" if uses else "end_turn", content, uses, s.get("text", ""))
 
 
+class ChainLLM:
+    """Ordered providers: an agent run that fails on one provider restarts on the next."""
+
+    def __init__(self, providers):
+        self.providers = providers
+        self.name = "+".join(p.name for p in providers)
+
+
 def get_llm(mode="auto"):
-    """mode: auto (Claude if credentials present), claude, none."""
+    """mode: auto (every provider with credentials, Claude first), claude, gemini, none."""
     if mode == "none":
         return None
-    if mode == "auto" and not credentials_present():
+    providers, errors = [], []
+    if mode in ("auto", "claude") and (mode == "claude" or credentials_present()):
+        try:
+            providers.append(ClaudeLLM())
+        except Exception as e:
+            errors.append(f"claude: {e}")
+    if mode in ("auto", "gemini"):
+        from .gemini import GeminiLLM, gemini_keys
+        if mode == "gemini" or gemini_keys():
+            try:
+                providers.append(GeminiLLM())
+            except Exception as e:
+                errors.append(f"gemini: {e}")
+    if not providers:
+        if mode != "auto":
+            raise LLMUnavailable("; ".join(errors) or f"{mode} is not configured")
         return None
-    return ClaudeLLM()
+    return providers[0] if len(providers) == 1 else ChainLLM(providers)
