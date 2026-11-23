@@ -40,14 +40,32 @@ come from `guardian/risk.py`, never from the LLM; the Defense agent can only pic
 
 ## Dashboard
 
-Static dashboard in `frontend/` (overview, Dependency Matrix, graph, findings with evidence, lockfile history,
-coverage gaps). It reads the files in `output/`:
-
 ```bash
-guardian scan targets/NodeGoat          # or `guardian run ...`
-python3 -m http.server 8000             # from the repo root
-# open http://localhost:8000/frontend/
+guardian serve                    # then open http://127.0.0.1:8000
 ```
+
+Paste any public GitHub URL and press **Analyse**. The dashboard shows live pipeline progress and then:
+overview, a force-directed **dependency network** (click a package to trace its path from the project root;
+filter to prod-only or risky paths), the Dependency Matrix, findings with evidence and risk breakdown, agent
+investigations and priorities, remediation proposals with diffs and **approve / reject**, independent validation
+results, the live audit trail, the report and coverage gaps.
+
+## Supported ecosystems
+
+| Ecosystem | Files | Graph |
+|---|---|---|
+| npm | `package-lock.json` / `npm-shrinkwrap.json`, `yarn.lock` (v1), `package.json` | full / full / declared only |
+| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges) | full / full / flat / pins (+edges) |
+| Go | `go.mod` | direct + indirect (indirect parents unknown) |
+| Rust | `Cargo.lock` (+ `Cargo.toml` for dev deps) | full |
+| Ruby | `Gemfile.lock` | full |
+| PHP | `composer.lock`, `composer.json` | full / declared only |
+| Java | `pom.xml` | declared only (transitive needs `mvn dependency:tree`) |
+| ROS | `package.xml` | declared rosdep keys (no versions) |
+| Git | `.repos` (vcstool), `.gitmodules` | declared |
+
+Monorepos: every manifest becomes a project node under one repository root. Anything that cannot be
+resolved (unpinned ranges, missing lockfiles, Gradle, pnpm, C/C++ build files) is listed under coverage gaps.
 
 ## Dashboard API
 
@@ -150,8 +168,11 @@ tests/                       unit tests (no network, no API key needed)
 
 ## Known limitations
 
-- Only npm `package-lock.json` (v2/v3) is parsed; other manifests are reported as coverage gaps.
-- Many lockfiles omit licenses (706 of 1,091 components for NodeGoat); reported as a coverage gap.
+- Lockfile git-history checks (SC1) cover npm lockfiles only; automatic fix patches cover npm and pinned
+  Python requirements, other ecosystems get exact manual upgrade instructions.
+- Many lockfiles omit licenses; reported as a coverage gap.
+- Runtime validation: apps with a smoke profile (`policies/smoke_profiles.json`) are booted and tested; other repos
+  get a `docker build` when a Dockerfile exists, otherwise static validation (rescan) only.
 - Vulnerabilities come from OSV only. Advisories without a CVSS v3 vector use the advisory's own severity label.
 - Fixed versions come from OSV and are not yet checked for availability or compatibility.
 - Indicators are heuristics, not proof of compromise. SC1 compares hashes of the same algorithm only, so npm's

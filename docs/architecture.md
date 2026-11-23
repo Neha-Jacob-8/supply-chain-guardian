@@ -65,7 +65,7 @@ Every agent has a labelled rule-based fallback, so the pipeline completes withou
 
 ```mermaid
 flowchart TD
-  A[package-lock.json v2/v3] --> B[Node-style resolution<br/>parent -> child edges]
+  A[all manifests and lockfiles<br/>npm, PyPI, Go, Cargo, RubyGems,<br/>Packagist, Maven, ROS, git] --> B[per-ecosystem parsers<br/>parent -> child edges]
   B --> C[unique name@version components<br/>direct/transitive, prod/dev, shortest path]
   C --> D[CycloneDX 1.5 SBOM]
   C --> E[Dependency Matrix CSV/JSON]
@@ -149,4 +149,5 @@ flowchart TD
 | Validation | `guardian/validation/` |
 | Report | `guardian/reporting/` |
 | Policies (weights, EOL dates) | `guardian/policies/` |
-| API / CLI | `guardian/api.py`, `guardian/cli.py` |
+| Ecosystem parsers | `guardian/discovery/ecosystems/` |
+| API / CLI / web UI | `guardian/api.py`, `guardian/cli.py`, `guardian/web/` |

@@ -53,7 +53,8 @@ Without credentials every agent runs a labelled rule-based fallback, and the rep
 ## Known limitations
 
 - Reachability is package-level (is the package imported), not function-level.
-- Only npm `package-lock.json` is analysed deeply; other ecosystems are reported as coverage gaps.
+- Depth varies by ecosystem: full graphs from lockfiles, declared-only for Maven/ROS/manifests without locks;
+  every unresolved part is reported as a coverage gap rather than guessed.
 - Indicators are heuristics and can produce false positives (one was found and fixed: npm's sha1 to sha512
   re-records); they are labelled as indicators, not proof.
 - The end-of-life table is a static snapshot.
