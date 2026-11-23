@@ -1,10 +1,12 @@
 # Architecture
 
+![Architecture overview](architecture.svg)
+
 Software Supply Chain Guardian takes a repository from discovery to independently validated remediation.
 Deterministic tools produce all evidence and all numbers; LLM agents investigate, prioritise and choose
 among computed fixes; a human approves; an independent validator decides whether a fix worked.
 
-## 1. System overview
+## 1. System overview (flowchart)
 
 ```mermaid
 flowchart LR
@@ -19,7 +21,7 @@ flowchart LR
   DISC --> OSV[(OSV API)]
   DISC --> INTEL[(CISA KEV, FIRST EPSS)]
   ORCH --> AGENTS[Attack / Risk / Defense agents]
-  AGENTS -.->|tool use| LLM[[Claude API]]
+  AGENTS -.->|tool use| LLM[[LLM providers<br/>Gemini keys x models, Claude,<br/>rule-based fallback]]
   AGENTS --> TOOLS[Read-only tools]
   TOOLS --> REG[(npm registry)]
   TOOLS --> EVID[(Evidence store<br/>output/evidence/EV-*.json)]
