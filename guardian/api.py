@@ -256,4 +256,6 @@ def create_app(out_dir="output"):
 
 def serve(out_dir="output", host="127.0.0.1", port=8000):
     import uvicorn
+    from .config import load_dotenv
+    load_dotenv()
     uvicorn.run(create_app(out_dir), host=host, port=port)
