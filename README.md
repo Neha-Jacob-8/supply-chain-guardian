@@ -54,8 +54,8 @@ results, the live audit trail, the report and coverage gaps.
 
 | Ecosystem | Files | Graph |
 |---|---|---|
-| npm | `package-lock.json` / `npm-shrinkwrap.json`, `yarn.lock` (v1), `package.json` | full / full / declared only |
-| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges) | full / full / flat / pins (+edges) |
+| npm | `package-lock.json` / `npm-shrinkwrap.json`, `pnpm-lock.yaml` (workspaces), `yarn.lock` (v1), `package.json` | full / full / full / declared only |
+| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges), `pyproject.toml` | full / full / flat / pins (+edges) / declared only |
 | Go | `go.mod` | direct + indirect (indirect parents unknown) |
 | Rust | `Cargo.lock` (+ `Cargo.toml` for dev deps) | full |
 | Ruby | `Gemfile.lock` | full |
@@ -65,7 +65,27 @@ results, the live audit trail, the report and coverage gaps.
 | Git | `.repos` (vcstool), `.gitmodules` | declared |
 
 Monorepos: every manifest becomes a project node under one repository root. Anything that cannot be
-resolved (unpinned ranges, missing lockfiles, Gradle, pnpm, C/C++ build files) is listed under coverage gaps.
+resolved (unpinned ranges, missing lockfiles, Gradle, C/C++ build files) is listed under coverage gaps.
+Only files that belong to the repository are scanned (`git ls-files`, so `.gitignore`d folders are skipped), and
+test fixtures / vendored code are excluded.
+
+## LLM providers and key fallback
+
+Agents run on whichever providers have credentials, configured in `.env` (git-ignored) or the environment:
+
+```bash
+GEMINI_API_KEYS=key1,key2,key3      # tried in order; also GEMINI_API_KEY, GEMINI_API_KEY_1..9
+GUARDIAN_GEMINI_MODELS=gemini-3.5-flash,gemini-flash-latest,gemini-3.5-flash-lite   # optional override
+ANTHROPIC_API_KEY=...               # optional; Claude is tried first when present
+```
+
+`--llm auto` (default) uses every configured provider in order (Claude, then Gemini); `--llm gemini` or
+`--llm claude` pins one; `--llm none` forces the rule-based agents. For Gemini, each request walks keys in order and,
+per key, models in order: an invalid key is dropped for the run, a retired model (404) is dropped for all keys,
+quota errors (429) move to the next model/key, overload (5xx) is retried once with backoff. If every key and model
+fails, the agent restarts on the next provider, and finally uses its labelled rule-based fallback. Keys travel only
+in the request header and are never written to logs, events or reports; the audit trail records which key number
+(`#1`, `#2`) and model answered.
 
 ## Dashboard API
 
@@ -87,7 +107,7 @@ guardian serve --port 8000        # http://127.0.0.1:8000/docs for interactive A
 
 ## Requirements
 
-- Python 3.10+ (Day 1 pipeline: standard library only; LLM agents: `anthropic` SDK)
+- Python 3.11+ (core needs only PyYAML, for pnpm lockfiles; Claude agents: `anthropic`; Gemini uses plain HTTP)
 - Docker (validation only)
 - Network access to `api.osv.dev` for the first scan (later scans can run with `--offline`)
 
@@ -96,7 +116,7 @@ guardian serve --port 8000        # http://127.0.0.1:8000/docs for interactive A
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"          # [llm] Claude agents, [api] dashboard server; `pip install -e .` = stdlib-only pipeline
-export ANTHROPIC_API_KEY=...     # optional: enables Claude agents; otherwise agents use labelled rule-based fallbacks
+cp .env.example .env              # then add your keys (the file is git-ignored)
 ```
 
 ## Quick start

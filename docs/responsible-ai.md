@@ -13,7 +13,8 @@
 | Defense agent (Blue Team) | Yes | Chooses among computed fix candidates; explains trade-offs | Invent a fix, apply it, or declare it successful |
 | Validation | No | — | Verdicts come from build, test and rescan results |
 
-Model: `claude-opus-5-5` via the Anthropic Messages API with adaptive thinking and server-side refusal fallback.
+Models: Gemini (default order `gemini-3.5-flash` → `gemini-flash-latest` → lite models, with ordered key fallback) and/or
+`claude-opus-5-5` via the Anthropic Messages API. The audit trail records which provider, model and key number answered.
 Without credentials every agent runs a labelled rule-based fallback, and the report states which mode ran.
 
 ## How hallucinations are controlled
@@ -46,7 +47,8 @@ Without credentials every agent runs a labelled rule-based fallback, and the rep
 - File excerpts given to the LLM pass through a secret-redaction filter; `read_file` refuses paths outside the
   repository. Only excerpts, never whole repositories, are sent to the LLM.
 - Data sent to external services: package names/versions (OSV, npm registry), CVE ids (EPSS), and code
-  excerpts (Claude API, only in LLM mode). No credentials are sent anywhere.
+  excerpts (Gemini / Claude APIs, only in LLM mode). Repository secrets are redacted first. API keys live in a
+  git-ignored `.env`, are sent only as request headers, and never appear in logs, events or reports.
 - The demo tamper (`scripts/seed_demo.py`) is a local commit on a local branch pointing at a reserved
   `.example` domain; nothing is published to any registry.
 
