@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1060" width="1600" height="1060" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif">
+  <title>Software Supply Chain Guardian architecture</title>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4A4F55"/></marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B87514"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C2373C"/></marker>
+    <style>
+      .t { font-size: 15px; font-weight: 600; fill: #1C1E20; }
+      .s { font-size: 12.5px; fill: #4A4F55; }
+      .m { font-family: IBM Plex Mono, Menlo, monospace; font-size: 11.5px; fill: #5F625F; }
+      .h { font-size: 11px; font-weight: 600; letter-spacing: .08em; fill: #6B6E70; }
+      .det { fill: #FFFFFF; stroke: #2E3338; stroke-width: 1.4; }
+      .llm { fill: #FFF6E8; stroke: #E8A33D; stroke-width: 1.8; }
+      .hum { fill: #EEF7EF; stroke: #46A758; stroke-width: 1.8; }
+      .ext { fill: #FFFFFF; stroke: #8B8D98; stroke-width: 1.2; stroke-dasharray: 5 4; }
+      .sto { fill: #F1EFEA; stroke: #8B8D98; stroke-width: 1.2; }
+      .ln  { stroke: #4A4F55; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+      .lna { stroke: #B87514; stroke-width: 1.4; fill: none; marker-end: url(#aa); stroke-dasharray: 4 3; }
+      .lnr { stroke: #C2373C; stroke-width: 1.4; fill: none; marker-end: url(#ar); stroke-dasharray: 6 4; }
+      .lnd { stroke: #8B8D98; stroke-width: 1.1; fill: none; marker-end: url(#a); stroke-dasharray: 3 3; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1060" fill="#F7F5F0"/>
+  <text x="40" y="52" font-size="26" font-weight="600" fill="#1C1E20">Software Supply Chain Guardian</text>
+  <text x="40" y="78" class="s" font-size="14">Agentic AI that discovers, investigates, prioritises, remediates and independently validates supply-chain risk in any public GitHub repository</text>
+
+  <!-- ===== interfaces ===== -->
+  <text x="40" y="128" class="h">INTERFACES</text>
+  <rect x="40" y="140" width="250" height="74" rx="4" class="det"/>
+  <text x="56" y="166" class="t">Web dashboard</text>
+  <text x="56" y="186" class="s">URL input, live pipeline, network</text>
+  <text x="56" y="203" class="s">graph, approvals, validation</text>
+  <rect x="40" y="236" width="250" height="60" rx="4" class="det"/>
+  <text x="56" y="262" class="t">REST API</text>
+  <text x="56" y="282" class="m">guardian serve (FastAPI)</text>
+  <rect x="40" y="318" width="250" height="60" rx="4" class="det"/>
+  <text x="56" y="344" class="t">CLI</text>
+  <text x="56" y="364" class="m">scan · run · approve · resume</text>
+  <path d="M165 214 L165 236" class="ln"/>
+  <path d="M290 266 L338 266" class="ln"/>
+  <path d="M290 348 L338 348" class="ln"/>
+
+  <!-- ===== orchestrator panel ===== -->
+  <rect x="340" y="110" width="860" height="660" rx="6" fill="#FBFAF7" stroke="#2E3338" stroke-width="1.6"/>
+  <text x="362" y="140" class="t" font-size="17">Guardian Orchestrator</text>
+  <text x="560" y="140" class="s">state machine · shared RunState · decisions logged · re-plans when a fix fails</text>
+
+  <!-- row 1: ingestion + discovery -->
+  <rect x="362" y="162" width="200" height="118" rx="4" class="det"/>
+  <text x="378" y="188" class="t">Ingestion</text>
+  <text x="378" y="208" class="s">github.com URLs only</text>
+  <text x="378" y="225" class="s">hooks off, no submodules</text>
+  <text x="378" y="242" class="s">git ls-files scope</text>
+  <text x="378" y="266" class="m">ingestion.py</text>
+  <path d="M562 221 L590 221" class="ln"/>
+
+  <rect x="590" y="162" width="590" height="190" rx="4" class="det"/>
+  <text x="606" y="188" class="t">1  Discovery &amp; detection</text>
+  <text x="790" y="188" class="h">DETERMINISTIC TOOLS</text>
+  <text x="606" y="214" class="s">• 9 ecosystems: npm, pnpm, yarn, PyPI, Go, Cargo,</text>
+  <text x="606" y="231" class="s">   RubyGems, Packagist, Maven + ROS, git deps</text>
+  <text x="606" y="248" class="s">• one dependency network across all projects</text>
+  <text x="606" y="265" class="s">• CycloneDX SBOM · Dependency Matrix</text>
+  <text x="606" y="282" class="s">• coverage gaps instead of guesses</text>
+  <text x="900" y="214" class="s">• OSV advisories, CVSS, fixed versions</text>
+  <text x="900" y="231" class="s">• non-CVE detectors: lockfile tamper,</text>
+  <text x="900" y="248" class="s">   sources, install scripts, containers, CI</text>
+  <text x="900" y="265" class="s">• risk formula: CVSS, KEV/EPSS, prod/dev,</text>
+  <text x="900" y="282" class="s">   reachability, directness → 0–100</text>
+  <text x="900" y="299" class="s">• deterministic fix candidates + diffs</text>
+  <text x="606" y="336" class="m">discovery/ · intel/ · remediation/</text>
+
+  <!-- row 2: LLM agents -->
+  <text x="800" y="394" class="h">LLM AGENTS · READ-ONLY TOOLS · CITED EVIDENCE</text>
+  <rect x="362" y="402" width="262" height="140" rx="4" class="llm"/>
+  <text x="378" y="428" class="t">2  Attack agent</text>
+  <text x="378" y="446" class="s" fill="#8A5A0E">Red Team</text>
+  <text x="378" y="468" class="s">investigates non-CVE indicators:</text>
+  <text x="378" y="485" class="s">registry vs lockfile, commits,</text>
+  <text x="378" y="502" class="s">files → attack path, verdict</text>
+  <text x="378" y="528" class="m">agents/attack.py</text>
+
+  <rect x="640" y="402" width="262" height="140" rx="4" class="llm"/>
+  <text x="656" y="428" class="t">3  Risk analysis agent</text>
+  <text x="656" y="468" class="s">ranks priorities from formula</text>
+  <text x="656" y="485" class="s">scores + investigations; checks</text>
+  <text x="656" y="502" class="s">reachability; never re-scores</text>
+  <text x="656" y="528" class="m">agents/risk_analyst.py</text>
+
+  <rect x="918" y="402" width="262" height="140" rx="4" class="llm"/>
+  <text x="934" y="428" class="t">4  Defense agent</text>
+  <text x="934" y="446" class="s" fill="#8A5A0E">Blue Team</text>
+  <text x="934" y="468" class="s">chooses among computed fixes;</text>
+  <text x="934" y="485" class="s">cannot invent, apply or approve;</text>
+  <text x="934" y="502" class="s">no patch → human escalation</text>
+  <text x="934" y="528" class="m">agents/defense.py</text>
+
+  <path d="M780 352 L780 380 L493 380 L493 402" class="ln"/>
+  <path d="M624 472 L640 472" class="ln"/>
+  <path d="M902 472 L918 472" class="ln"/>
+
+  <!-- row 3: approval, validation, report -->
+  <rect x="362" y="600" width="262" height="140" rx="4" class="hum"/>
+  <text x="378" y="626" class="t">Human approval gate</text>
+  <text x="378" y="652" class="s">every fix needs approval;</text>
+  <text x="378" y="669" class="s">diff, compatibility, rollback</text>
+  <text x="378" y="686" class="s">shown; nothing auto-merged</text>
+  <text x="378" y="726" class="m">dashboard · guardian approve</text>
+
+  <rect x="640" y="600" width="262" height="140" rx="4" class="det"/>
+  <text x="656" y="626" class="t">5  Validation agent</text>
+  <text x="656" y="644" class="h">INDEPENDENT · NO LLM</text>
+  <text x="656" y="666" class="s">patch a copy → regen lockfile →</text>
+  <text x="656" y="683" class="s">rescan vs own baseline → boot +</text>
+  <text x="656" y="700" class="s">smoke test → verified / partial / failed</text>
+  <text x="656" y="726" class="m">validation/sandbox.py</text>
+
+  <rect x="918" y="600" width="262" height="140" rx="4" class="det"/>
+  <text x="934" y="626" class="t">Guardian Security Report</text>
+  <text x="934" y="652" class="s">findings + evidence, priorities,</text>
+  <text x="934" y="669" class="s">fixes + approvals, validation,</text>
+  <text x="934" y="686" class="s">remaining risk, coverage gaps</text>
+  <text x="934" y="726" class="m">report.md · report.json</text>
+
+  <path d="M1049 542 L1049 570 L493 570 L493 600" class="ln"/>
+  <text x="700" y="563" class="s" fill="#2F7A3B">proposals wait for a human</text>
+  <path d="M624 670 L640 670" class="ln"/>
+  <path d="M902 670 L918 670" class="ln"/>
+  <path d="M771 740 L771 762 L1190 762 L1190 520 L1182 520" class="lnr"/>
+  <text x="786" y="756" class="s" fill="#C2373C">failed → alternative fix (needs approval again) or escalation</text>
+
+  <!-- ===== right column ===== -->
+  <text x="1240" y="128" class="h">LLM PROVIDERS (FALLBACK CHAIN)</text>
+  <rect x="1240" y="140" width="320" height="196" rx="4" class="llm"/>
+  <text x="1256" y="166" class="t">Gemini</text>
+  <text x="1256" y="186" class="s">keys #1 … #n  ×  models</text>
+  <text x="1256" y="203" class="m">3.5-flash → flash-latest → lite</text>
+  <text x="1256" y="224" class="s">bad key → drop · 404 → skip model</text>
+  <text x="1256" y="241" class="s">429 → next model/key · 5xx → retry</text>
+  <text x="1256" y="270" class="t">Claude <tspan class="s" font-weight="400">(optional, tried first)</tspan></text>
+  <text x="1256" y="300" class="t">Rule-based fallback</text>
+  <text x="1256" y="320" class="s">labelled; pipeline always completes</text>
+  <path d="M1240 472 L1180 472" class="lna"/>
+  <path d="M1400 336 L1400 472 L1240 472" class="lna"/>
+  <text x="1250" y="465" class="s" fill="#8A5A0E">tool-use loop</text>
+
+  <rect x="1240" y="360" width="320" height="94" rx="4" fill="#FFFFFF" stroke="#C2373C" stroke-width="1.4"/>
+  <text x="1256" y="384" class="t">Guardrails (in code)</text>
+  <text x="1256" y="404" class="s">schema + citation check on every result</text>
+  <text x="1256" y="421" class="s">unknown CVE / evidence id → rejected</text>
+  <text x="1256" y="438" class="s">secrets redacted · step budget</text>
+
+  <text x="1240" y="520" class="h">EXTERNAL SOURCES (READ-ONLY)</text>
+  <rect x="1240" y="532" width="150" height="48" rx="4" class="ext"/><text x="1256" y="561" class="t">GitHub</text>
+  <rect x="1410" y="532" width="150" height="48" rx="4" class="ext"/><text x="1426" y="561" class="t">OSV.dev</text>
+  <rect x="1240" y="592" width="150" height="48" rx="4" class="ext"/><text x="1256" y="621" class="t">CISA KEV</text>
+  <rect x="1410" y="592" width="150" height="48" rx="4" class="ext"/><text x="1426" y="621" class="t">FIRST EPSS</text>
+  <rect x="1240" y="652" width="320" height="48" rx="4" class="ext"/><text x="1256" y="681" class="t">npm registry · git ls-remote</text>
+  <path d="M1240 556 L1200 556" class="lnd"/>
+  <path d="M1240 676 L1200 676" class="lnd"/>
+
+  <rect x="1240" y="716" width="320" height="54" rx="4" fill="#E9EEF3" stroke="#7C9CB5" stroke-width="1.4"/>
+  <text x="1256" y="740" class="t">Docker sandbox</text>
+  <text x="1256" y="758" class="s">non-root, --ignore-scripts, limits</text>
+  <path d="M880 740 L880 788 L1400 788 L1400 772" class="lnd"/>
+
+  <!-- ===== stores ===== -->
+  <text x="340" y="808" class="h">STATE, EVIDENCE AND OUTPUTS</text>
+  <rect x="340" y="820" width="200" height="96" rx="4" class="sto"/>
+  <text x="356" y="846" class="t">RunState</text>
+  <text x="356" y="866" class="m">run_state.json</text>
+  <text x="356" y="886" class="s">stages, agent outputs,</text>
+  <text x="356" y="902" class="s">approvals, verdicts</text>
+  <rect x="560" y="820" width="200" height="96" rx="4" class="sto"/>
+  <text x="576" y="846" class="t">Evidence store</text>
+  <text x="576" y="866" class="m">evidence/EV-*.json</text>
+  <text x="576" y="886" class="s">tool outputs + OSV records</text>
+  <text x="576" y="902" class="s">each with SHA-256</text>
+  <rect x="780" y="820" width="200" height="96" rx="4" class="sto"/>
+  <text x="796" y="846" class="t">Audit trail</text>
+  <text x="796" y="866" class="m">events.jsonl</text>
+  <text x="796" y="886" class="s">every decision, LLM step,</text>
+  <text x="796" y="902" class="s">tool call, approval</text>
+  <rect x="1000" y="820" width="200" height="96" rx="4" class="sto"/>
+  <text x="1016" y="846" class="t">Outputs</text>
+  <text x="1016" y="866" class="m">sbom.cdx.json</text>
+  <text x="1016" y="884" class="m">matrix.csv · graph.json</text>
+  <text x="1016" y="902" class="m">findings.json</text>
+  <path d="M770 770 L770 820" class="ln"/>
+
+  <!-- ===== legend ===== -->
+  <text x="40" y="808" class="h">LEGEND</text>
+  <rect x="40" y="822" width="26" height="16" rx="3" class="det"/><text x="76" y="835" class="s">deterministic code / tools</text>
+  <rect x="40" y="848" width="26" height="16" rx="3" class="llm"/><text x="76" y="861" class="s">LLM agent / provider</text>
+  <rect x="40" y="874" width="26" height="16" rx="3" class="hum"/><text x="76" y="887" class="s">human decision</text>
+  <rect x="40" y="900" width="26" height="16" rx="3" class="ext"/><text x="76" y="913" class="s">external, read-only</text>
+  <rect x="40" y="926" width="26" height="16" rx="3" class="sto"/><text x="76" y="939" class="s">persisted state / evidence</text>
+
+  <text x="40" y="1012" class="s">Evidence comes from tools; AI interprets it. Scores and verdicts are computed, never generated. Every fix needs human approval and independent validation.</text>
+  <text x="40" y="1034" class="m">github.com/Neha-Jacob-8/supply-chain-guardian</text>
+</svg>
