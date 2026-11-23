@@ -28,7 +28,8 @@ guardian approve --ids FIX-...,FIX-...               # human decision (or --ids 
 guardian resume targets/NodeGoat                     # independent validation + report
 ```
 
-Options: `--llm auto|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip Docker boot test),
+Options: `--llm auto|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static
+validation remains partial),
 `--history N` (lockfile commits to compare).
 
 ## What it does
@@ -41,11 +42,13 @@ Options: `--llm auto|gemini|claude|none`, `--offline` (cached data only), `--no-
 | 3 Risk analysis agent | LLM + read-only tools | ranked priorities with rationale (scores stay formula-based) |
 | 4 Defense agent (Blue Team) | LLM + read-only tools | fix proposals chosen from computed candidates; patch-less fixes escalate to a human |
 | Approval gate | human | approve / reject each fix (dashboard or CLI) |
-| 5 Validation agent | deterministic | patch a copy, regenerate lockfile in Docker, rescan, boot + smoke test → verified / partial / failed |
+| 5 Validation agent | deterministic | patch a copy, regenerate lockfile safely, rescan, run only a trusted profile's tests/smoke checks → verified / partial / failed |
 | Report | code | `report.md` + `report.json`, audit trail in `events.jsonl` |
 
-Details: [docs/implementation.md](docs/implementation.md) · flowcharts: [docs/architecture.md](docs/architecture.md) ·
-[Responsible AI & security note](docs/responsible-ai.md) · [demo script](docs/demo.md)
+Details: [docs/requirements.md](docs/requirements.md) · [docs/implementation.md](docs/implementation.md) ·
+flowcharts: [docs/architecture.md](docs/architecture.md) · [operations runbook](docs/operations.md) ·
+[presentation runbook](docs/presentation.md) · [Responsible AI & security note](docs/responsible-ai.md) ·
+[demo script](docs/demo.md)
 
 ## Supported ecosystems
 
@@ -101,29 +104,31 @@ guardian/
   policies/                      risk weights, end-of-life dates, smoke profiles (editable data)
   web/                           dashboard (HTML/CSS/JS, served by `guardian serve`)
 scripts/seed_demo.py             local lockfile-tamper demo branch
-tests/                           33 unit tests (no network, no API key)
-docs/                            architecture, implementation, responsible AI, demo
+tests/                           44 unit tests (no network, no API key; optional SDK shape test uses anthropic)
+docs/                            requirements, architecture, implementation, operations, presentation, responsible AI, demo
 ```
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -t .
+uv run --with pyyaml --with fastapi --with uvicorn --with anthropic python -m unittest discover -s tests -t .
 ```
 
 CI runs them on every push (GitHub Actions, SHA-pinned, read-only token).
 
 ## Safety
 
-Only public `github.com` repositories are cloned, with git hooks disabled. Target code never runs on the host:
-lockfile regeneration uses `--ignore-scripts` and builds run in Docker as a non-root user. Repository secrets are
-redacted before anything reaches an LLM. Nothing is merged, pushed or deployed automatically.
+Only public `github.com` repositories are cloned, with git hooks disabled and no credential prompts. Target code
+never runs on the host: lockfile regeneration uses `--ignore-scripts` and runs in Docker as a non-root user.
+Unknown repositories never execute arbitrary Dockerfiles/Compose; runtime checks require an allowlisted remote
+identity and pass a host-escape policy first. Repository secrets are redacted before anything reaches an LLM.
+Nothing is merged, pushed or deployed automatically.
 
 ## Known limitations
 
 - Reachability is package-level (is the package imported), not function-level.
 - Automatic patches cover npm and pinned Python requirements; other ecosystems get exact manual instructions.
 - Lockfile history ("what changed") is analysed for npm lockfiles.
-- Runtime validation uses a smoke profile when one exists (`policies/smoke_profiles.json`), otherwise a Docker build,
-  otherwise static rescan only.
+- Runtime validation uses a trusted smoke profile when one exists (`policies/smoke_profiles.json`); unknown or
+  untrusted repositories receive a static rescan and an explicit `partial` verdict.
 - Indicators are heuristics, not proof of compromise; the end-of-life table is a static snapshot.

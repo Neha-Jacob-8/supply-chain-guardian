@@ -10,6 +10,7 @@ import json
 import re
 from pathlib import Path
 
+from ..ingestion import repository_identity
 from ..intel.osv import _semver_key
 from ..intel.registry import registry_metadata, resolve_ref_sha
 
@@ -20,8 +21,10 @@ def _diff(path, old, new):
     return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"a/{path}", f"b/{path}"))
 
 
-def _cid(rule, key):
-    return f"FIX-{rule}-{hashlib.sha1(key.encode()).hexdigest()[:8]}"
+def _cid(rule, key, diff_sha256):
+    """Candidate identity is bound to both its logical subject and exact patch."""
+    material = f"{key}|{diff_sha256}"
+    return f"FIX-{rule}-{hashlib.sha256(material.encode()).hexdigest()[:12]}"
 
 
 def _major(v):
@@ -34,11 +37,47 @@ def _clean_fix(fixed):
 
 def _candidate(rule, key, action, summary, files, closes, change_risk, compat, rollback, component_id=None,
                requires=None, needs_lockfile_regen=False):
-    return {"candidate_id": _cid(rule, key), "action": action, "summary": summary,
+    diff = "".join(_diff(p, o, n) for p, (o, n) in files.items())
+    diff_sha256 = hashlib.sha256(diff.encode()).hexdigest()
+    base_files_sha256 = {p: hashlib.sha256(old.encode()).hexdigest() for p, (old, _new) in files.items()}
+    return {"candidate_id": _cid(rule, key, diff_sha256), "action": action, "summary": summary,
             "component_id": component_id, "closes": sorted(set(closes)), "change_risk": change_risk,
             "compat_notes": compat, "rollback": rollback, "requires": requires or [],
             "needs_lockfile_regen": needs_lockfile_regen,
-            "files": files, "diff": "".join(_diff(p, o, n) for p, (o, n) in files.items())}
+            "files": files, "diff": diff, "diff_sha256": diff_sha256,
+            "base_files_sha256": base_files_sha256}
+
+
+def _insert_top_level_permissions(text):
+    """Insert a workflow-level permissions block without moving nested `on:` events."""
+    lines = text.splitlines(keepends=True)
+    if any(re.match(r"^permissions\s*:", line) for line in lines):
+        return text
+    on_index = next((i for i, line in enumerate(lines) if re.match(r"^on\s*:", line)), None)
+    if on_index is None:
+        insert_at = next((i + 1 for i, line in enumerate(lines) if re.match(r"^name\s*:", line)), 0)
+    else:
+        insert_at = on_index + 1
+        # A block-style `on:` mapping ends at the next non-comment top-level key.
+        if not lines[on_index].split(":", 1)[1].strip():
+            while insert_at < len(lines):
+                stripped = lines[insert_at].strip()
+                if stripped and not stripped.startswith("#") and not lines[insert_at][0].isspace():
+                    break
+                insert_at += 1
+    block = ["\n" if insert_at and lines[insert_at - 1].strip() else "", "permissions:\n", "  contents: read\n"]
+    lines[insert_at:insert_at] = block
+    return "".join(lines)
+
+
+def _is_nodegoat_demo(repo):
+    """Return true only for the explicitly documented demo target.
+
+    Runtime/container migration policies are not generic dependency fixes. Keep
+    them behind an identity gate so a similarly named arbitrary repository never
+    receives a NodeGoat-specific MongoDB/Node recommendation.
+    """
+    return (repository_identity(repo).get("remote_id") or "") == "owasp/nodegoat"
 
 
 # ---------- generators ----------
@@ -204,7 +243,7 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
                     new = new.replace(f"{action}{sub}@{ref}", f"{action}{sub}@{sha} # {ref}", 1)
                     closes.append(f["finding_id"])
             if f["rule_id"] == "CI2" and f["evidence"].get("path") == rel and "permissions:" not in new:
-                new = re.sub(r"^(on:.*\n)", r"\1\npermissions:\n  contents: read\n", new, count=1, flags=re.M)
+                new = _insert_top_level_permissions(new)
                 closes.append(f["finding_id"])
         if new != text:
             out.append(_candidate(
@@ -213,10 +252,13 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
                 "Same action versions, now immutable. If a job needs write access, grant it per job.",
                 f"git checkout {rel}"))
 
-    # 5) containers -> supported runtime (Dockerfile) and database (compose)
+    # 5) containers -> supported runtime (Dockerfile) and database (compose).
+    # These two migrations are intentionally restricted to the trusted demo
+    # profile; generic repositories receive findings and human escalation.
+    demo_target = _is_nodegoat_demo(repo)
     for name in ("Dockerfile",):
         p = repo / name
-        if not p.exists():
+        if not p.exists() or not demo_target:
             continue
         text = p.read_text()
         new = re.sub(r"^FROM node:\d+(-alpine)?", "FROM node:22-alpine", text, flags=re.M)
@@ -231,7 +273,7 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
                 "Revert the Dockerfile FROM/RUN lines"))
     for name in ("docker-compose.yml", "docker-compose.yaml"):
         p = repo / name
-        if not p.exists():
+        if not p.exists() or not demo_target:
             continue
         text = p.read_text()
         new = re.sub(r"(image:\s*)mongo:[\d.]+", r"\1mongo:7.0", text)

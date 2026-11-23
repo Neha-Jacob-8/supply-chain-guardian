@@ -10,12 +10,13 @@ Verdict: verified | partial | failed. Target code only ever runs inside containe
 """
 import hashlib
 import http.client
-import json
 import shutil
 import subprocess
 import time
 import urllib.parse
 from pathlib import Path
+
+import yaml
 
 from ..discovery import build_inventory
 from ..intel.detectors import run_detectors
@@ -26,11 +27,103 @@ from ..policies import load as load_policy
 SEV = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 
+class ValidationPolicyError(RuntimeError):
+    """Raised when a target asks the validator for unsafe host/container access."""
+
+
+def _compose_files(work):
+    root = Path(work)
+    ignored = {".git", "node_modules", ".venv", "venv", "target"}
+    return sorted(p for p in root.rglob("*compose*.y*ml")
+                  if not ignored.intersection(p.relative_to(root).parts))
+
+
+def _outside_repo(work, source, base=None):
+    """Return true for a bind source that can escape the validation copy."""
+    if not isinstance(source, str) or not source:
+        return False
+    source = source.strip()
+    # Interpolation is intentionally rejected: the validator cannot prove where
+    # ${PWD}, ${HOME}, or another host-provided value resolves.
+    if "$" in source or source.startswith("~") or "docker.sock" in source:
+        return True
+    candidate = Path(source)
+    if candidate.is_absolute():
+        return True
+    try:
+        return not ((Path(base) if base else Path(work)) / candidate).resolve().is_relative_to(Path(work).resolve())
+    except (OSError, ValueError):
+        return True
+
+
+def compose_policy_violations(work):
+    """Return unsafe Compose constructs before any target container is started.
+
+    Runtime execution is only enabled for an explicitly trusted profile, but this
+    policy is still enforced as a second fail-closed boundary.
+    """
+    violations = []
+    for path in _compose_files(work):
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except Exception as exc:
+            violations.append(f"{path.name}: invalid YAML ({type(exc).__name__})")
+            continue
+        for service, cfg in (data.get("services") or {}).items():
+            if not isinstance(cfg, dict):
+                continue
+            for field in ("privileged", "network_mode", "pid", "ipc", "userns_mode"):
+                value = cfg.get(field)
+                if value is True or value == "host":
+                    violations.append(f"{path.name}:{service} uses unsafe {field}={value!r}")
+            if cfg.get("cap_add") or cfg.get("devices") or cfg.get("security_opt"):
+                violations.append(f"{path.name}:{service} requests capabilities/devices/security options")
+            for item in cfg.get("volumes") or []:
+                if isinstance(item, str):
+                    source = item.split(":", 1)[0]
+                else:
+                    item = item or {}
+                    source = item.get("source", "")
+                    if item.get("type") not in (None, "bind"):
+                        source = ""  # named/managed volumes do not expose the host
+                if _outside_repo(work, source, path.parent):
+                    violations.append(f"{path.name}:{service} mounts host path {source!r}")
+            build = cfg.get("build")
+            context = build.get("context") if isinstance(build, dict) else build
+            if _outside_repo(work, context, path.parent):
+                violations.append(f"{path.name}:{service} builds from context outside the repository")
+            for field in ("env_file", "secrets", "configs"):
+                entries = cfg.get(field) or []
+                if isinstance(entries, (str, dict)):
+                    entries = [entries]
+                for entry in entries:
+                    source = entry if isinstance(entry, str) else (entry or {}).get("file", "")
+                    if _outside_repo(work, source, path.parent):
+                        violations.append(f"{path.name}:{service} references host file {source!r} via {field}")
+    return violations
+
+
 def _run(cmd, cwd=None, timeout=900):
     t = time.time()
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-    return {"cmd": " ".join(cmd), "rc": r.returncode, "seconds": round(time.time() - t, 1),
-            "log_tail": (r.stdout + r.stderr)[-2500:]}
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        rc, output = r.returncode, r.stdout + r.stderr
+    except FileNotFoundError as exc:
+        rc, output = 127, str(exc)
+    except subprocess.TimeoutExpired as exc:
+        rc = 124
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        output = stdout + stderr + " command timed out"
+    return {"cmd": " ".join(cmd), "rc": rc, "seconds": round(time.time() - t, 1),
+            "log_tail": output[-2500:]}
+
+
+def _compose_cmd():
+    """Select the v2 Compose executable without requiring a user config edit."""
+    if shutil.which("docker-compose"):
+        return ["docker-compose"]
+    return ["docker", "compose"]
 
 
 def _key(f, comps):
@@ -72,31 +165,51 @@ def _http(method, path, body=None, port=4000):
 
 
 def smoke_profile(state):
-    """The runtime check for this repo: a named profile, a plain Docker build, or None (static only)."""
+    """Return a trusted runtime profile, or None for static-only validation.
+
+    A repository name alone is not trusted: the configured remote identity must
+    match the profile. Generic Dockerfiles/Compose files are never executed by
+    default because they are untrusted code.
+    """
     names = {p.get("name") for p in (state.inventory or {}).get("projects", [])}
     for prof in load_policy("smoke_profiles.json")["profiles"]:
-        if names & set(prof["match"].get("project_names", [])):
+        allowed = set(prof.get("trusted_remote_ids", []))
+        remote_id = (getattr(state, "identity", {}) or {}).get("remote_id")
+        if names & set(prof["match"].get("project_names", [])) and (not allowed or remote_id in allowed):
             return prof
-    if (state.repo / "Dockerfile").exists():
-        return {"name": "docker build", "build_only": True}
     return None
 
 
 def runtime_check(work, project, prof):
     """Returns (steps, ok). ok is None when no runtime check applies."""
     if prof is None:
-        return [{"name": "runtime_check", "rc": 0, "detail": "no Dockerfile or smoke profile: static validation only"}], None
+        return [{"name": "runtime_check", "rc": 0, "detail": "no trusted runtime profile: static only; runtime checks skipped"}], None
+    violations = compose_policy_violations(work) if prof.get("compose") else []
+    if violations:
+        return [{"name": "sandbox_policy", "rc": 1, "detail": "; ".join(violations[:8])}], False
     if prof.get("build_only"):
         r = _run(["docker", "build", "--pull=false", "-t", f"{project}:check", "."], cwd=work, timeout=1200)
         r["name"] = "docker_build"
         _run(["docker", "image", "rm", "-f", f"{project}:check"], timeout=120)
         return [r], r["rc"] == 0
     steps = []
-    up = _run(["docker", "compose", "-p", project, "up", "-d", "--build"], cwd=work, timeout=900)
+    compose = _compose_cmd()
+    up = _run([*compose, "-p", project, "up", "-d", "--build"], cwd=work, timeout=900)
     up["name"] = "build_and_boot"; steps.append(up)
     try:
         if up["rc"] != 0:
             return steps, False
+        for test in prof.get("test_commands", []):
+            service = test["service"]
+            cmd = [*compose, "-p", project, "exec", "-T"]
+            if test.get("user"):
+                cmd += ["--user", str(test["user"])]
+            cmd += [service, *test["command"]]
+            result = _run(cmd, cwd=work, timeout=test.get("timeout", 900))
+            result["name"] = test.get("name", "test")
+            steps.append(result)
+            if result["rc"] != 0:
+                return steps, False
         ok = True
         for i, chk in enumerate(prof["checks"]):
             status, loc = None, None
@@ -115,12 +228,12 @@ def runtime_check(work, project, prof):
                           + (f" Location={loc}" if loc else "")})
             if not passed:
                 ok = False
-                logs = _run(["docker", "compose", "-p", project, "logs", "--tail", "30"], cwd=work)
+                logs = _run([*compose, "-p", project, "logs", "--tail", "30"], cwd=work)
                 steps.append({"name": "app_logs", "rc": 0, "log_tail": logs["log_tail"]})
                 break
         return steps, ok
     finally:
-        _run(["docker", "compose", "-p", project, "down", "-v", "--remove-orphans"], cwd=work, timeout=300)
+        _run([*compose, "-p", project, "down", "-v", "--remove-orphans"], cwd=work, timeout=300)
 
 
 def validate(state, cand, smoke=True, baseline_ok=True):
@@ -138,7 +251,7 @@ def validate(state, cand, smoke=True, baseline_ok=True):
     for pj in [p for p in cand["files"] if p.endswith("package.json")] if cand.get("needs_lockfile_regen") else []:
         app_dir = (work / pj).parent.resolve()
         r = _run(["docker", "run", "--rm", "--memory", "2g", "--user", "1000:1000", "-e", "HOME=/tmp",
-                  "-v", f"{app_dir}:/app", "-w", "/app", "node:22-alpine",
+                  "--mount", f"type=bind,src={app_dir},dst=/app", "-w", "/app", "node:22-alpine",
                   "npm", "install", "--package-lock-only", "--ignore-scripts", "--lockfile-version", "2",
                   "--no-audit", "--no-fund"], timeout=900)
         r["name"] = "regenerate_lockfile"; steps.append(r)
@@ -180,9 +293,12 @@ def validate(state, cand, smoke=True, baseline_ok=True):
         steps += s_steps
     if summary is not None:
         summary["smoke"] = {"baseline_ok": baseline_ok, "after_ok": smoke_ok}
+        summary["runtime_validated"] = smoke_ok is not None
     if summary is not None:
         summary["runtime_check"] = (smoke_profile(state) or {}).get("name", "static only")
-    if smoke and smoke_ok is False and baseline_ok:
+    if not smoke or smoke_ok is None:
+        verdict = "partial"
+    elif smoke_ok is False and baseline_ok:
         verdict = "failed"                      # the fix broke a working app
     elif smoke and smoke_ok is False:
         verdict = "partial"                     # app was already broken and still is
@@ -206,4 +322,5 @@ def baseline_smoke(state):
     work = _copy(state.repo, state.out / "validation" / "baseline_app")
     steps, ok = runtime_check(work, "gvbaseline", prof)
     state.log("validation_agent", "baseline_smoke", {"ok": ok, "profile": (prof or {}).get("name", "static only")})
-    return {"ok": True if ok is None else ok, "profile": (prof or {}).get("name", "static only"), "steps": steps}
+    return {"ok": ok, "profile": (prof or {}).get("name", "static only"),
+            "runtime_validated": ok is not None, "steps": steps}

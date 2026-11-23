@@ -11,6 +11,7 @@ import json
 import time
 
 from .. import pipeline
+from ..ingestion import repository_identity
 from ..intel import risk
 from ..remediation import build_candidates
 from ..reporting import write_report
@@ -28,6 +29,7 @@ class Orchestrator:
     def __init__(self, repo, out, llm_mode="auto", offline=False, history=20, smoke=True):
         self.state = RunState(repo, out)
         self.offline, self.history, self.smoke = offline, history, smoke
+        self.state.run_config = {"offline": offline, "history": history, "smoke": smoke}
         try:
             self.llm = get_llm(llm_mode)
         except Exception as e:
@@ -54,6 +56,7 @@ class Orchestrator:
             self.decide("stop", "no supported lockfile; see coverage_gaps.json")
             return False
         s.inventory, s.comps, s.changes, s.gaps = inv, comps, changes, inv["gaps"]
+        s.identity = repository_identity(s.repo)
         s.set_findings(findings)
         s.risk, s.usage = risk.score_all(findings, comps, s.repo, s.out / "cache" / "intel", self.offline)
         for f in findings:            # additive field for the dashboard
@@ -87,14 +90,23 @@ class Orchestrator:
         res = DefenseAgent().run(self.state, self.llm)
         by_id = {c["candidate_id"]: c for c in self.state.candidates}
         self.state.proposals = [dict(p, mode=res["mode"], change_risk=by_id[p["candidate_id"]]["change_risk"],
-                                     summary=by_id[p["candidate_id"]]["summary"], diff=by_id[p["candidate_id"]]["diff"])
+                                     summary=by_id[p["candidate_id"]]["summary"], diff=by_id[p["candidate_id"]]["diff"],
+                                     diff_sha256=by_id[p["candidate_id"]].get("diff_sha256"),
+                                     base_files_sha256=by_id[p["candidate_id"]].get("base_files_sha256", {}),
+                                     requires=by_id[p["candidate_id"]].get("requires", []),
+                                     needs_lockfile_regen=by_id[p["candidate_id"]].get("needs_lockfile_regen", False))
                                 for p in res["proposals"] if p["candidate_id"] in by_id]
         self.state.escalations = res.get("escalations", [])
         # candidates without a patch (manual upgrades, no fix published) go to a human, not to approval/validation
         manual = [p for p in self.state.proposals if by_id[p["candidate_id"]]["action"] == "escalate" or not by_id[p["candidate_id"]]["files"]]
         for p in manual:
             c = by_id[p["candidate_id"]]
-            self.state.escalations.append({"finding_ids": p["finding_ids"], "reason": f"{c['summary']}. {c['compat_notes']}"})
+            escalation = {"finding_ids": p["finding_ids"], "reason": f"{c['summary']}. {c['compat_notes']}"}
+            key = (tuple(sorted(escalation["finding_ids"])), escalation["reason"])
+            existing = {(tuple(sorted(e.get("finding_ids", []))), e.get("reason", ""))
+                        for e in self.state.escalations}
+            if key not in existing:
+                self.state.escalations.append(escalation)
         if manual:
             self.decide("route manual fixes to escalation", f"{len(manual)} proposal(s) have no patch to validate")
         self.state.proposals = [p for p in self.state.proposals if p not in manual]
@@ -120,7 +132,14 @@ class Orchestrator:
                 ans = input("  approve? [y/N] ").strip().lower()
                 decision = "approved" if ans == "y" else "rejected"
             if decision:
-                s.approvals[cid] = {"status": decision, "by": "human reviewer", "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                s.approvals[cid] = {
+                    "status": decision,
+                    "by": "human reviewer",
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "repo_identity": s.identity,
+                    "diff_sha256": p.get("diff_sha256"),
+                    "base_files_sha256": p.get("base_files_sha256", {}),
+                }
                 s.log("human", "approval", {"candidate_id": cid, "status": decision})
         n = sum(1 for p in s.proposals if s.approvals[p["candidate_id"]]["status"] == "approved")
         pending = sum(1 for p in s.proposals if s.approvals[p["candidate_id"]]["status"] == "pending")
@@ -133,8 +152,9 @@ class Orchestrator:
         by_id = {c["candidate_id"]: c for c in s.candidates}
         if self.smoke:
             s.baseline_smoke = baseline_smoke(s)
-            print(f"  baseline smoke test on unmodified app: {'pass' if s.baseline_smoke['ok'] else 'FAIL'}")
-            if not s.baseline_smoke["ok"]:
+            status = "pass" if s.baseline_smoke["ok"] is True else "FAIL" if s.baseline_smoke["ok"] is False else "not available"
+            print(f"  baseline runtime check on unmodified app: {status}")
+            if s.baseline_smoke["ok"] is False:
                 self.decide("judge smoke results relative to baseline",
                             "the unmodified app already fails to build/boot; a fix that makes it pass is an improvement")
         queue = [p["candidate_id"] for p in s.proposals if s.approvals.get(p["candidate_id"], {}).get("status") == "approved"]
@@ -199,6 +219,23 @@ class Orchestrator:
         if not self.discover():
             return self.finish()
         s = self.state
+        expected_identity = saved.get("identity")
+        if not expected_identity:
+            raise RuntimeError("saved run has no repository identity; fresh approval is required")
+        for key in ("remote_id", "commit"):
+            if expected_identity.get(key) != s.identity.get(key):
+                raise RuntimeError(f"repository {key} changed since approval; rerun and approve the new candidate")
+        current = {c["candidate_id"]: c for c in s.candidates}
+        for old in saved.get("proposals", []):
+            new = current.get(old["candidate_id"])
+            if not new or new.get("diff_sha256") != old.get("diff_sha256") or \
+                    new.get("base_files_sha256", {}) != old.get("base_files_sha256", {}):
+                raise RuntimeError(f"candidate {old['candidate_id']} changed since approval; fresh approval is required")
+        for cid, approval in saved.get("approvals", {}).items():
+            if approval.get("status") == "approved" and \
+                    (approval.get("repo_identity", {}).get("commit") != s.identity.get("commit") or
+                     approval.get("diff_sha256") != current.get(cid, {}).get("diff_sha256")):
+                raise RuntimeError(f"approval for {cid} is not bound to the current commit/diff")
         s.investigations, s.priorities = saved["investigations"], saved["priorities"]
         s.proposals, s.approvals = saved["proposals"], saved["approvals"]
         s.risk_summary = saved.get("risk_summary", "")

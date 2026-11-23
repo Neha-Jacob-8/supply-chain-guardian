@@ -126,11 +126,15 @@ def create_app(out_dir="output"):
             raise HTTPException(400, "decision must be approve or reject")
         f = out / "run_state.json"
         st = load("run_state.json")
-        if candidate_id not in {p["candidate_id"] for p in st["proposals"]}:
+        proposal = next((p for p in st["proposals"] if p["candidate_id"] == candidate_id), None)
+        if proposal is None:
             raise HTTPException(404, "unknown proposal")
         st["approvals"][candidate_id] = {"status": "approved" if req.decision == "approve" else "rejected",
                                          "by": "human reviewer (dashboard)", "comment": req.comment,
-                                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                                         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                         "repo_identity": st.get("identity"),
+                                         "diff_sha256": proposal.get("diff_sha256"),
+                                         "base_files_sha256": proposal.get("base_files_sha256", {})}
         f.write_text(json.dumps(st, indent=2))
         with open(out / "events.jsonl", "a") as ev:
             ev.write(json.dumps({"t": time.time(), "stage": "awaiting_approval", "actor": "human", "kind": "approval",

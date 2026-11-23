@@ -61,8 +61,12 @@ def main():
         for i in ids:
             if i not in props:
                 print(f"unknown candidate {i}"); continue
-            st["approvals"][i] = {"status": "rejected" if a.reject else "approved", "by": "human reviewer",
-                                  "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            p = props[i]
+            st["approvals"][i] = {
+                "status": "rejected" if a.reject else "approved", "by": "human reviewer",
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "repo_identity": st.get("identity"),
+                "diff_sha256": p.get("diff_sha256"), "base_files_sha256": p.get("base_files_sha256", {}),
+            }
             print(f"{st['approvals'][i]['status']}: {i}  {props[i]['summary']}")
         f.write_text(json.dumps(st, indent=2))
         return

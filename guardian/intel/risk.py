@@ -17,6 +17,7 @@ import re
 import urllib.request
 from pathlib import Path
 
+from ..config import cache_is_fresh
 from ..policies import load as load_policy
 
 _W = load_policy("risk_weights.json")
@@ -43,7 +44,7 @@ def load_intel(cves, cache_dir, offline=False):
     cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
     kev_f, epss_f = cache_dir / "kev.json", cache_dir / "epss.json"
     kev = None
-    if kev_f.exists():
+    if kev_f.exists() and (offline or cache_is_fresh(kev_f)):
         kev = set(json.loads(kev_f.read_text()))
     elif not offline:
         try:
@@ -52,7 +53,7 @@ def load_intel(cves, cache_dir, offline=False):
             kev_f.write_text(json.dumps(sorted(kev)))
         except Exception:
             kev = None
-    epss = json.loads(epss_f.read_text()) if epss_f.exists() else {}
+    epss = json.loads(epss_f.read_text()) if epss_f.exists() and (offline or cache_is_fresh(epss_f)) else {}
     missing = sorted(set(cves) - set(epss))
     if missing and not offline:
         try:

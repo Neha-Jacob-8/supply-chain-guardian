@@ -94,6 +94,25 @@ class Detectors(unittest.TestCase):
         found = lockfile_consistency(d, "package-lock.json", {})
         self.assertEqual([f["title"].split(":")[0] for f in found], ["a"])
 
+    def test_sc6_new_direct_dependency_and_sc7_major_jump(self):
+        d = Path(tempfile.mkdtemp())
+        g = lambda *a: subprocess.run(["git", "-C", str(d), "-c", "core.hooksPath=/dev/null",
+                                       "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                      check=True, capture_output=True)
+        g("init", "-q")
+        lock = d / "package-lock.json"
+        before = {"packages": {"": {"dependencies": {"alpha": "^1.0.0"}},
+                                "node_modules/alpha": {"version": "1.2.0"}}}
+        after = {"packages": {"": {"dependencies": {"alpha": "^2.0.0", "bravo": "^1.0.0"}},
+                               "node_modules/alpha": {"version": "2.1.0"},
+                               "node_modules/bravo": {"version": "1.0.0"}}}
+        lock.write_text(json.dumps(before, indent=2)); g("add", "."); g("commit", "-qm", "before")
+        lock.write_text(json.dumps(after, indent=2)); g("add", "."); g("commit", "-qm", "after")
+        found, _ = lockfile_history(d, "package-lock.json")
+        self.assertEqual({f["rule_id"] for f in found}, {"SC6", "SC7"})
+        self.assertTrue(any("bravo" in f["title"] for f in found))
+        self.assertTrue(any("alpha" in f["title"] for f in found))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,23 @@
 """Load KEY=VALUE pairs from a local .env file into the environment (existing variables win)."""
 import os
+import time
 from pathlib import Path
+
+
+def cache_ttl_seconds():
+    """Online intelligence cache lifetime; offline mode always permits stale replay."""
+    try:
+        return max(0, int(os.environ.get("GUARDIAN_CACHE_TTL_SECONDS", "86400")))
+    except ValueError:
+        return 86400
+
+
+def cache_is_fresh(path, ttl=None):
+    path = Path(path)
+    if not path.is_file():
+        return False
+    ttl = cache_ttl_seconds() if ttl is None else ttl
+    return ttl == 0 or time.time() - path.stat().st_mtime <= ttl
 
 
 def load_dotenv(path=".env"):

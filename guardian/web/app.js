@@ -395,12 +395,13 @@ function renderValidation() {
   $('#vals').innerHTML = S.vals.map((v, i) => {
     const c = v.comparison || {}, b = c.before || {}, a = c.after || {};
     const delta = (x, y) => { const d = (y ?? 0) - (x ?? 0); return d ? `<span class="${d < 0 ? 'delta-down' : 'delta-up'}">${d > 0 ? '+' : ''}${d}</span>` : '<span class="muted">±0</span>'; };
+    const runtimeLabel = x => x === null || x === undefined ? 'n/a' : x ? 'pass' : 'fail';
     return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || '')}</span></div>${chip(v.verdict, 'v-' + v.verdict)}</div>
       <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
           ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>
           <div><span>Targets resolved</span><b>${(c.resolved || []).length}/${c.targets}</b></div><div><span>Newly introduced</span><b>${c.introduced_count}</b> ${(c.introduced_high || []).length ? chip(`${c.introduced_high.length} high`, 'sev-HIGH') : ''}</div>
-          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? (c.smoke.after_ok === null ? 'n/a' : c.smoke.after_ok ? 'pass' : 'fail') : '–'}</b> <span class="muted">baseline ${c.smoke ? (c.smoke.baseline_ok ? 'pass' : 'fail') : '–'}</span></div></div>` : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
+          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>` : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
   }).join('') || '<div class="empty">No validations yet. Approve fixes under Remediation, then run independent validation.</div>';
 }
 

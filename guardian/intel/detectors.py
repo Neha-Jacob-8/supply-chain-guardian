@@ -9,6 +9,8 @@ Rules
   SC3  package runs install scripts (current lockfile / newly added in history)
   SC4  dependency spec is floating (latest, *, tarball/git branch without commit)
   SC5  lockfile v2 sections disagree (legacy `dependencies` vs `packages`): npm 6 and npm 7+ would install different code
+  SC6  new direct dependency appeared in lockfile history
+  SC7  direct dependency made an unexplained major-version jump in lockfile history
   MT1  package deprecated by its maintainer
   CT1  container image not pinned to a digest
   CT2  container image runtime is end-of-life
@@ -29,6 +31,7 @@ from pathlib import Path
 
 from ..policies import load as load_policy
 from ..discovery.lockfile import make_purl, pkg_name
+from .osv import _semver_key
 
 REGISTRY = "https://registry.npmjs.org/"
 SKIP_DIRS = {"node_modules", ".git"}
@@ -209,6 +212,42 @@ def lockfile_history(repo, lock_rel, max_commits=20):
         changed = [k for k in set(new) & set(old) if k and new[k].get("version") != old[k].get("version")]
         changes.append({"commit": sha[:10], "date": day, "author": author, "subject": subject,
                         "added": len(added), "removed": len(removed), "version_changed": len(changed)})
+        old_root = old.get("", {})
+        new_root = new.get("", {})
+        old_direct = {**(old_root.get("dependencies") or {}), **(old_root.get("optionalDependencies") or {}),
+                      **(old_root.get("devDependencies") or {})}
+        new_direct = {**(new_root.get("dependencies") or {}), **(new_root.get("optionalDependencies") or {}),
+                      **(new_root.get("devDependencies") or {})}
+        for name in sorted(set(new_direct) - set(old_direct)):
+            key = f"node_modules/{name}"
+            pkg = new.get(key, {})
+            if not pkg.get("version"):
+                continue
+            cid = make_purl(name, pkg["version"])
+            ev = {"source": "git", "path": lock_rel, "commit": sha, "commit_date": day,
+                  "commit_subject": subject, "line": lines.get(key),
+                  "excerpt": json.dumps({"dependency": name, "version": pkg["version"],
+                                         "declared_spec": new_direct[name]})}
+            ev["sha256"] = _sha(ev["excerpt"])
+            findings.append(_finding(
+                "SC6", "suspicious", "MEDIUM", f"New direct dependency added: {name}@{pkg['version']}",
+                f"Commit {sha[:10]} added {name} to the root dependency declarations. Review the reason, provenance, and owner before trusting it.",
+                ev, cid, "Confirm the dependency is intentional, pin it, and review its provenance before release."))
+        for name in sorted(set(new_direct) & set(old_direct)):
+            key = f"node_modules/{name}"
+            old_pkg, new_pkg = old.get(key, {}), new.get(key, {})
+            old_ver, new_ver = old_pkg.get("version"), new_pkg.get("version")
+            if not old_ver or not new_ver or _semver_key(old_ver)[0][0] == _semver_key(new_ver)[0][0]:
+                continue
+            cid = make_purl(name, new_ver)
+            ev = {"source": "git", "path": lock_rel, "commit": sha, "commit_date": day,
+                  "commit_subject": subject, "line": lines.get(key),
+                  "excerpt": json.dumps({"dependency": name, "before": old_ver, "after": new_ver})}
+            ev["sha256"] = _sha(ev["excerpt"])
+            findings.append(_finding(
+                "SC7", "suspicious", "MEDIUM", f"Direct dependency major version changed: {name} {old_ver} -> {new_ver}",
+                f"Commit {sha[:10]} changed a direct dependency across a major-version boundary. Confirm compatibility and review the change rationale.",
+                ev, cid, "Review release notes and run the application test suite before accepting the major upgrade."))
         algo_upgrades = 0
         base_ev = {"source": "git", "path": lock_rel, "commit": sha, "commit_date": day,
                    "commit_subject": subject}

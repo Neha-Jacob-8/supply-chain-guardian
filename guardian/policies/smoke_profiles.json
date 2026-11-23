@@ -1,10 +1,15 @@
 {
-  "_doc": "Runtime smoke tests per known application. Matched by npm/PyPI project name. Without a match, validation builds the repo's Dockerfile if present, otherwise it is static (rescan only).",
+  "_doc": "Runtime checks are allowlisted by project name and trusted remote identity. Unmatched or untrusted repositories receive static-only validation; their code is never executed. Commands run inside the named Compose service.",
   "profiles": [
     {
       "name": "OWASP NodeGoat",
       "match": {"project_names": ["owasp-nodejs-goat"]},
+      "trusted_remote_ids": ["owasp/nodegoat"],
       "compose": true,
+      "test_commands": [
+        {"name": "install_test_dependencies", "service": "web", "user": "root", "command": ["npm", "install", "--ignore-scripts", "--include=dev", "--no-audit", "--no-fund"], "timeout": 900},
+        {"name": "unit_tests", "service": "web", "command": ["npm", "test"], "timeout": 900}
+      ],
       "port": 4000,
       "checks": [
         {"method": "GET", "path": "/login", "expect_status": [200]},

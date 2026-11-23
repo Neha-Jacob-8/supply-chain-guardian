@@ -1,140 +1,121 @@
-# Implementation
+# Implementation notes
 
-How Software Supply Chain Guardian is built: components, data flow, agents, guardrails and test results.
-For the picture see [architecture.svg](architecture.svg); for flowcharts see [architecture.md](architecture.md).
+This document explains the implementation behind the requirements map. It is intentionally precise about what is
+deterministic, what is model-assisted, and what is still a limitation.
 
-## 1. Technology
+## Technology choices
 
-| Layer | Choice | Why |
+| Layer | Choice | Reason |
 |---|---|---|
-| Language | Python 3.11+ | `tomllib`, typing; core uses the standard library plus PyYAML (pnpm only) |
-| Vulnerability data | OSV.dev (`querybatch` + records), GHSA severity fallback | one source covering npm, PyPI, Go, crates.io, RubyGems, Packagist, Maven |
-| Exploit intelligence | CISA KEV, FIRST EPSS | exploitability factor in the risk score |
-| SBOM | CycloneDX 1.5 JSON (written directly) | standard, machine-readable |
-| LLM | Gemini (REST, key + model fallback), Claude (Anthropic SDK, optional) | tool-use agents; provider chain with rule-based fallback |
-| API | FastAPI + uvicorn | dashboard backend, background jobs |
-| UI | static HTML/CSS/JS + force-graph (canvas) | no build step; served by the API |
-| Sandbox | Docker (`node:22-alpine`, docker compose) | target code never runs on the host |
-| CI | GitHub Actions (SHA-pinned actions, read-only token) | passes the Guardian's own CI rules |
+| Runtime | Python 3.11+ | standard library for core orchestration; PyYAML for Compose/pnpm data |
+| Vulnerability intelligence | OSV.dev | exact-version queries with affected ranges, fixed versions, aliases and evidence URLs |
+| Exploit intelligence | CISA KEV + FIRST EPSS | application-context prioritization beyond CVSS |
+| SBOM | CycloneDX 1.5 JSON | portable machine-readable inventory |
+| Agents | typed tool-use loops with Claude/Gemini providers and deterministic fallback | genuine role separation without making an LLM authoritative |
+| API/UI | FastAPI/Uvicorn plus static HTML/CSS/JS | live run, evidence, graph, matrix and approval views without a frontend build step |
+| Validation | Docker Engine/Desktop | target code is not executed on the host; lockfile generation uses `--ignore-scripts` |
 
-## 2. Data flow
+## Deterministic discovery and detection
 
-```
-GitHub URL ─► ingestion (clone) ─► discovery (parsers → network) ─► OSV + detectors ─► risk scores ─► fix candidates
-           ─► Attack agent ─► Risk agent ─► Defense agent ─► approval gate ─► Validation ─► report
-```
+`guardian/pipeline.py` is the single Day-1 entry point. It builds the normalized inventory, writes the SBOM/graph/
+matrix, queries OSV, runs non-CVE detectors, calculates risk scores, and generates candidate patches. A parser gap
+is written to `coverage_gaps.json`; unknown data is never filled with a guess.
 
-All stages read and write one `RunState` through the orchestrator; every step is appended to `events.jsonl`.
+Supported inventory inputs include npm (`package-lock`, npm-shrinkwrap, pnpm workspaces, Yarn v1, package.json),
+Python (Poetry, uv, Pipenv, requirements), Go, Cargo, RubyGems, Composer, Maven, ROS, and `.repos`/`.gitmodules`
+declarations. Full dependency edges are available when a lockfile contains them; declared-only ecosystems are
+labelled accordingly.
 
-## 3. Discovery (`guardian/discovery/`)
+The detector catalog is:
 
-- `ecosystems/__init__.py` lists repository files with `git ls-files` (so `.gitignore`d folders are never scanned),
-  skips fixtures/vendored code, applies precedence (a lockfile beats its manifest in the same folder) and parses
-  each manifest with its ecosystem parser. One broken manifest becomes a coverage gap, not a failed scan.
-- Parsers (`npm.py`, `python.py`, `others.py`) return a common `ProjectGraph`: packages keyed by purl, parent→child
-  edges, direct dependencies with prod/dev scope. `base.assemble` computes direct/transitive, scope and the
-  shortest dependency path (prod paths preferred for prod packages).
-- `inventory.py` merges projects into one network (repo root → project roots → packages), keeps the strongest
-  classification for packages shared by several projects, and builds the SBOM.
-- npm lockfiles use Node's own resolution (nested `node_modules` first, then ancestors); pnpm builds one project per
-  workspace importer containing only the packages it reaches.
-
-## 4. Detection and scoring (`guardian/intel/`)
-
-**Vulnerabilities** (`osv.py`): batched OSV queries for exact versions in OSV-covered ecosystems; records cached on
-disk with SHA-256 (offline replay); CVSS v3 base score computed from the vector; affected range and fixed version
-from the matching OSV range; severity from the GHSA alias when the native record has none.
-
-**Indicators** (`detectors.py`), all deterministic with file/line/commit evidence:
-
-| Rule | Detects |
+| Rule | Signal |
 |---|---|
-| SC1 | lockfile integrity changed without a version change (git history; same hash algorithm only) |
-| SC2 | dependency resolved outside the registry, or a git dependency on a moving branch |
-| SC3 | packages that run install scripts (current and newly added) |
-| SC4 | floating specs: `latest`, `*`, URL/git refs, unpinned Python requirements |
-| SC5 | npm v2 lockfile sections disagree (npm ≤6 and ≥7 would install different code) |
-| MT1 | packages deprecated by their maintainer |
-| CT1–CT5 | image not digest-pinned, end-of-life runtime, root user, remote script piped to shell, `npm install` instead of `npm ci` |
-| CI1–CI4 | actions not pinned to a SHA, missing `permissions:`, `pull_request_target`, untrusted event data in `run:` |
+| SC1 | lockfile integrity changed without a version change |
+| SC2 | resolved package moved off the registry or to a moving branch |
+| SC3 | install scripts execute package code |
+| SC4 | floating manifest specs or unpinned URL/git references |
+| SC5 | npm lockfile v2 legacy and `packages` sections disagree |
+| SC6 | a new direct dependency appeared in lockfile history |
+| SC7 | a direct dependency crossed a semantic-version major in lockfile history |
+| MT1 | maintainer-deprecated package |
+| CT1–CT5 | digest pinning, EOL image, root container, remote script, `npm install` versus `npm ci` |
+| CI1–CI4 | mutable GitHub Actions, missing permissions, `pull_request_target`, untrusted event data in `run` |
 
-**Risk** (`risk.py`), 0–100, with a factor breakdown and confidence:
-`40·CVSS/10 + (25 if in CISA KEV else 15·EPSS) + (15 prod / 3 dev) + reachability (15 direct & imported, 8 under an
-imported direct dependency) + 5 if direct`. Indicators use rule weights from `policies/risk_weights.json`.
-Reachability scans application code for imports (npm, Python, Go, Rust, Ruby); other ecosystems are marked
-"not analysed", which lowers confidence instead of scoring zero.
+Every indicator includes rule ID, severity, component (when applicable), path/line/commit, excerpt, SHA-256 and a
+recommendation. Indicators are signals, not proof that a package is malicious.
 
-## 5. Remediation candidates (`guardian/remediation/`)
+## Risk formula
 
-Deterministic candidates with exact file diffs, compatibility notes and rollback: direct upgrades to the fixed
-version (npm `package.json` per project, pinned `requirements.txt`), npm `overrides` for vulnerable transitive
-packages, lockfile restore from official registry values (tamper fix), GitHub Actions pinned to resolved SHAs plus a
-read-only `permissions:` block, supported base images. Fixed versions are checked against the registry. Ecosystems
-without automatic patching get a manual instruction that is routed to human escalation.
+Vulnerability findings use:
 
-## 6. Agents (`guardian/agents/`)
+`40 × CVSS/10 + exploitability + exposure + reachability + directness`
 
-| Agent | Tools (read-only) | Produces |
+- exploitability is 25 for CISA KEV, otherwise `15 × EPSS` when available;
+- exposure is 15 for production and 3 for development;
+- reachability is 15 for a directly imported package and 8 for a transitive package under an imported direct parent;
+- directness contributes 5.
+
+Indicators use policy weights in `guardian/policies/risk_weights.json`, with production/dev exposure and a history
+bonus where relevant. Each score stores factor points, explanations, confidence, and `computed_by: formula`.
+
+## Agent contracts
+
+The orchestrator is the only component that advances stages or persists a decision. Agents cannot call each other.
+
+| Role | Reads | Writes |
 |---|---|---|
-| Attack (Red Team) | `get_finding`, `get_component`, `npm_registry_metadata`, `git_commit_info`, `read_file`, `check_import_usage`, `list_findings` | investigations: hypothesis, attack path, verified facts (with evidence ids), inferences, verdict, confidence |
-| Risk analysis | `get_finding`, `get_component`, `check_import_usage`, `list_findings`, `read_file` | top-10 priorities with rationale and recommendation |
-| Defense (Blue Team) | `get_fix_options`, `get_finding`, `get_component`, `check_import_usage`, `read_file` | proposals (candidate ids), escalations |
+| Attack/Red Team | findings, components, registry metadata, commits, imports, redacted files | hypotheses, attack paths, verified facts, inference, verdict |
+| Risk | findings, components, imports, existing scores | ranked priorities and explanation; never score values |
+| Defense/Blue Team | priorities, computed candidates, compatibility context | candidate IDs, rationale, rollback, escalation |
+| Validator | approved candidate, fresh copy, rescan and trusted runtime | deterministic comparison and verdict |
 
-**Loop** (`base.py`): the model calls tools; each result is stored as evidence `EV-…` and returned with its id; the
-agent finishes by calling `submit_result`. **Guardrails enforced in code:** the result must match its JSON schema;
-every cited finding/evidence id must exist; every CVE/GHSA mentioned must have been reported by OSV; violations are
-sent back as tool errors so the model corrects itself; a step budget bounds every run; file excerpts are
-secret-redacted. The Defense agent can only return candidate ids produced by `remediation/`.
+The tool layer stores each call as `EV-<hash>.json`. Submission guardrails reject unknown IDs, unsupported
+citations, malformed schemas, invented advisories, and out-of-repository paths. If a provider is unavailable or a
+step budget expires, the report says `rule-based fallback, no LLM` rather than implying an LLM ran.
 
-**Providers** (`llm.py`, `gemini.py`): a provider chain (Claude if configured, then Gemini). The Gemini backend walks
-keys × models with per-error handling (invalid key → drop, 404 → skip model, 429 → next, 5xx → retry once). If a
-provider fails, the agent restarts on the next one; if all fail, it runs a labelled rule-based fallback.
+## Candidate and approval integrity
 
-**Orchestrator** (`orchestrator.py`): stage machine, write permissions (only Validation produces verdicts),
-re-planning when a fix fails validation (an alternative candidate, which again needs approval), routing of
-patch-less fixes to escalation, and `resume` after human approval.
+Candidate IDs are SHA-256-derived from the logical subject and exact unified diff. Each candidate also stores
+`diff_sha256` and SHA-256 hashes of the original contents of every file it will touch. Proposals copy those hashes.
+Approvals recorded by CLI, dashboard, or API include the target's canonical remote ID, commit, diff hash, base-file
+hashes, reviewer and timestamp. `resume` reruns discovery and refuses stale identity, diff, or base-file state.
 
-## 7. Validation (`guardian/validation/sandbox.py`)
+NodeGoat-only container migration candidates are gated to the canonical `owasp/nodegoat` remote. A repository that
+merely contains `Dockerfile` or `docker-compose.yml` does not receive a target-specific NodeGoat patch.
 
-Per approved fix: copy the repository, apply the diff (refusing if files drifted), regenerate the npm lockfile in
-`node:22-alpine` with `--ignore-scripts`, rescan with the same tools, compare with the validator's own baseline
-rescan (resolved / remaining / newly introduced findings, SBOM diff), then run the runtime check: a smoke profile
-from `policies/smoke_profiles.json` (NodeGoat: boot with MongoDB, `GET /login`, `POST /login` → `/dashboard`), else a
-`docker build`, else static only. Verdict: **verified** (targets resolved, app works, no new high/critical),
-**partial**, or **failed** (the fix broke a working app). A baseline run proves the runtime check passes before any fix.
+## Independent validation
 
-## 8. Interfaces
+`guardian/validation/sandbox.py` is deliberately independent from the Defense agent. It copies the repository,
+checks candidate base content, applies the exact old/new pairs, and (for npm manifest changes) runs lockfile-only
+installation in a non-root `node:22-alpine` container with scripts disabled. It then builds a fresh baseline and
+patched inventory using the same OSV/detector code and computes:
 
-- **CLI** `guardian scan | run | approve | resume | serve`.
-- **REST API** `/api/status, overview, matrix, graph, sbom, findings, investigations, priorities, proposals,
-  validations, escalations, evidence/{id}, events, coverage, changes, inventory, report.md/json`;
-  `POST /api/runs`, `POST /api/proposals/{id}/approval`, `POST /api/resume`.
-- **Dashboard** (`guardian/web/`): URL input with live pipeline progress; overview; force-directed dependency
-  network (path tracing with animated edges, prod-only and risky-paths filters); matrix with CSV export; findings
-  with factor breakdown and evidence; agent outputs; remediation with diffs and approve/reject; validation timelines;
-  live audit trail; report; coverage gaps.
+- target findings resolved and remaining;
+- newly introduced findings and newly introduced high/critical findings;
+- before/after vulnerable-component counts;
+- SBOM component additions/removals;
+- trusted runtime/test evidence, when a profile exists.
 
-## 9. Results
+Runtime execution is fail-closed. Only a project-name plus trusted-remote profile in `guardian/policies/
+smoke_profiles.json` may run. Before Compose starts, the policy rejects host namespaces, privileged mode,
+capabilities/devices/security options, host sockets, outside-repository mounts/build contexts, interpolated host
+paths, and outside env/config/secret files. Unknown repositories are rescanned statically and receive `partial`,
+not `verified`. Compose invocation supports either the `docker-compose` v2 plugin or `docker compose`. The NodeGoat
+profile installs development dependencies with `--ignore-scripts` inside the running container before executing its
+unit command, because the application image is intentionally production-only.
 
-**OWASP NodeGoat** (primary target): 1,091 components (36 direct, 1,055 transitive; 380 prod), 131 vulnerable,
-313 OSV advisories, 66 supply-chain indicators. Agents on Gemini: Red Team confirmed the unpinned `grunt-if` GitHub
-dependency and end-of-life images with attack paths; every agent result passed the schema and citation checks.
+## Report schema
 
-**Validation**
+`report.json` has schema version `1.0` and includes the identity, run configuration/cache policy, complete inventory,
+serialized components, all findings, risk breakdown, priorities, investigations, proposals and approval bindings,
+escalations, baseline/runtime scope, validation comparisons, lockfile history, coverage gaps, evidence index, and
+remaining/resolved risk. `report.md` presents the same story for a developer and explicitly states when runtime
+evidence was not available.
 
-| Fix | Verdict | Why |
-|---|---|---|
-| lockfile restore (planted tamper) | verified | 3/3 targets resolved, app boots, login works |
-| `bson` override | verified | 2/2 targets resolved, no new findings |
-| `express` 4.16.4 → 4.20.0 | verified | 2/2 resolved; 3 new low/medium transitive findings reported |
-| `mongodb` 2.2.36 → 3.1.13 | **failed** | rescan said resolved, but the app crashed at startup (driver API change) |
+## Verification performed
 
-**Coverage**: 20 public repositories scanned without errors (npm, pnpm monorepo, Poetry, uv, Pipenv, requirements,
-Go, Cargo, RubyGems, Composer, Maven, Gradle → gap, CMake → gap, ROS, empty repo), 1–46 s each.
-
-## 10. Tests
-
-33 unit tests, no network or API key: lockfile resolution, CVSS maths, OSV range matching, every detector family
-(including the sha1→sha512 false-positive fix), ecosystem parsers (pip-compile edges, Cargo, Go, Gemfile, pnpm
-workspaces, monorepo merge, ROS/.repos), agent guardrails (invented ids rejected, schema violations corrected,
-secrets redacted, path escape blocked), the LLM client request shape, and Gemini key/model fallback.
+The repository currently passes 44 tests with the optional test dependencies installed. The suite covers parsers,
+CVSS/range matching, every detector family, redaction, candidate hashing, CI permissions placement, Compose safety,
+static-only verdict semantics, missing runtime binaries, agent schemas/guardrails, and LLM request shape. `compileall`
+also passes. A live rule-based NodeGoat run reproduced the current inventory and produced a complete report; exact
+vulnerability counts are a time-dependent intelligence snapshot.

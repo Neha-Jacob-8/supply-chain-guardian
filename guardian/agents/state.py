@@ -2,8 +2,9 @@
 import hashlib
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
+
+from ..ingestion import repository_identity
 
 
 class RunState:
@@ -27,6 +28,8 @@ class RunState:
         self.events = []
         self.llm_mode = "none"
         self.risk_summary, self.escalations, self.baseline_smoke = "", [], None
+        self.identity = repository_identity(self.repo)
+        self.run_config = {"offline": None, "history": None, "smoke": None}
 
     # ---- audit trail ----
     def log(self, actor, kind, detail):
@@ -62,7 +65,8 @@ class RunState:
     def save(self):
         data = {k: getattr(self, k) for k in ("stage", "changes", "gaps", "risk", "investigations", "priorities",
                                               "proposals", "approvals", "validations", "llm_mode",
-                                              "risk_summary", "escalations", "baseline_smoke")}
+                                              "risk_summary", "escalations", "baseline_smoke", "identity")}
+        data["run_config"] = self.run_config
         data["repo"] = str(self.repo)
         data["candidates"] = [{k: v for k, v in c.items() if k != "files"} for c in self.candidates]
         data["evidence"] = self.evidence

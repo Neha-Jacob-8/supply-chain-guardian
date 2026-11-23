@@ -6,13 +6,14 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from ..config import cache_is_fresh
 REGISTRY = "https://registry.npmjs.org"
 
 
 def registry_metadata(name, version, cache_dir, offline=False):
     cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
     f = cache_dir / (re.sub(r"[^\w.@-]", "_", f"{name}@{version}") + ".json")
-    if f.exists():
+    if f.exists() and (offline or cache_is_fresh(f)):
         return json.loads(f.read_text())
     if offline:
         return None

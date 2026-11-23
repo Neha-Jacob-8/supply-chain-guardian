@@ -27,7 +27,8 @@ flowchart LR
   TOOLS --> EVID[(Evidence store<br/>output/evidence/EV-*.json)]
   AGENTS --> GATE{{Human approval}}
   GATE --> VAL[Validation agent<br/>deterministic]
-  VAL --> DOCKER[[Docker sandbox]]
+  VAL --> POLICY{{Trusted profile + Compose policy}}
+  POLICY --> DOCKER[[Docker sandbox]]
   ORCH --> REP[(Guardian Report<br/>report.md + report.json)]
 ```
 
@@ -59,7 +60,7 @@ flowchart TB
 | Attack (Red Team) | LLM agent | `get_finding`, `get_component`, `npm_registry_metadata`, `git_commit_info`, `read_file`, `check_import_usage`, `list_findings` | investigations: hypothesis, attack path, verified facts vs inferences, verdict | write anything, execute code |
 | Risk Analysis | LLM agent | `get_finding`, `get_component`, `check_import_usage`, `list_findings`, `read_file` | ranked priorities with rationale | change a score |
 | Defense (Blue Team) | LLM agent | `get_fix_options`, `get_finding`, `get_component`, `check_import_usage`, `read_file` | proposals (candidate ids), escalations | invent a fix, apply a fix, declare success |
-| Validation | deterministic | Docker, rescan, smoke test | verdict per fix | — (no LLM involved) |
+| Validation | deterministic | identity-bound patch, independent rescan, allowlisted Docker profile, unit/HTTP checks | verdict per fix | never executes an untrusted repository runtime |
 
 Every agent has a labelled rule-based fallback, so the pipeline completes without an API key.
 
@@ -73,7 +74,7 @@ flowchart TD
   C --> E[Dependency Matrix CSV/JSON]
   C --> F[graph.json]
   C --> G[OSV querybatch + vuln records<br/>CVSS, range, fixed version]
-  A --> H[Detectors SC1-SC5, MT1]
+  A --> H[Detectors SC1-SC7, MT1]
   REPO[Dockerfile, compose, workflows] --> I[Detectors CT1-CT5, CI1-CI4]
   GIT[git history of lockfile] --> H
   G --> S[Risk formula<br/>CVSS, KEV/EPSS, exposure, reachability]
@@ -116,18 +117,21 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A[approved candidate] --> B[copy repo, apply file changes<br/>refuse if files drifted]
+  A[approved candidate] --> B[copy repo, bind identity + diff hashes<br/>refuse if files drifted]
   B --> C{package.json changed?}
   C -->|yes| D[Docker node:22: npm install<br/>--package-lock-only --ignore-scripts]
   C -->|no| E
   D --> E[rescan patched tree]
   E --> F[compare with validator's own baseline rescan<br/>resolved / remaining / introduced / SBOM diff]
-  F --> G[docker compose build + boot]
-  G --> H[smoke: GET /login, POST /login -> /dashboard]
-  H --> I{verdict}
-  I -->|all targets resolved, app works,<br/>no new high/critical| V[verified]
-  I -->|app works but targets remain<br/>or new high/critical| P[partial]
-  I -->|fix breaks a working app| X[failed -> orchestrator re-plans]
+  F --> G{trusted profile?}
+  G -->|no| P[static-only evidence]
+  G -->|yes| H[policy-check Compose, build + boot + unit command]
+  H --> I[smoke: GET /login, POST /login -> /dashboard]
+  P --> J{verdict}
+  I --> J{verdict}
+  J -->|all targets resolved, runtime evidence,<br/>no new high/critical| V[verified]
+  J -->|static-only, targets remain,<br/>or new high/critical| P2[partial]
+  J -->|fix breaks a working app| X[failed -> orchestrator re-plans]
 ```
 
 ## Evidence and approval points
@@ -135,7 +139,8 @@ flowchart TD
 - **Evidence**: OSV records (`output/cache/osv/*.json`, SHA-256 in each finding), file/line/commit excerpts for
   indicators, and every agent tool call (`output/evidence/EV-*.json`). Agents may only cite these ids.
 - **Approval**: the orchestrator stops at `awaiting_approval`; `guardian approve` or
-  `POST /api/proposals/{id}/approval` records the decision with time and reviewer in the audit trail.
+  `POST /api/proposals/{id}/approval` records the decision with time, reviewer, repository identity, exact diff
+  hash, and base-file hashes in the audit trail. Resume refuses stale approvals.
 - **Audit trail**: `output/events.jsonl` records every stage, decision, LLM step, tool call, rejected
   submission, approval and verdict.
 

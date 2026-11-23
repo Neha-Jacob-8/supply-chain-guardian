@@ -14,7 +14,16 @@ from ..intel.risk import import_usage
 
 TOOLS = {}
 MAX_CHARS = 8000
-SECRET = re.compile(r"""(?i)((?:api|zap)?[_-]?(?:key|secret|token|passw(?:or)?d)\w*["']?\s*[:=]\s*["'])([^"']{4,})(["'])""")
+# Redaction is intentionally conservative about field names but broad about common
+# credential encodings. Repository excerpts are untrusted input and may be sent to
+# an external model, so quoted and unquoted values must both be removed.
+SECRET_ASSIGNMENT = re.compile(
+    r"(?ix)(?P<name>\b(?:zap)?api[_-]?key\b|\b(?:access[_-]?key|secret(?:[_-]?key)?|token|password|passwd|pwd|private[_-]?key|client[_-]?secret)\b)"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^\s,;\"']{6,})(?P=quote)"
+)
+BEARER = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+TOKEN_PREFIX = re.compile(r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b")
+PRIVATE_KEY = re.compile(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.+?-----END [A-Z ]*PRIVATE KEY-----")
 
 
 def tool(name, description, properties, required=()):
@@ -43,7 +52,12 @@ def call(state, name, args):
 
 
 def redact(text):
-    return SECRET.sub(lambda m: m.group(1) + "[REDACTED]" + m.group(3), text)
+    if not isinstance(text, str):
+        return text
+    text = SECRET_ASSIGNMENT.sub(lambda m: f"{m.group('name')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}", text)
+    text = BEARER.sub(r"\1[REDACTED]", text)
+    text = TOKEN_PREFIX.sub("[REDACTED]", text)
+    return PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", text)
 
 
 from ..discovery.purl import short as _short

@@ -11,6 +11,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from ..config import cache_is_fresh
 from ..discovery.purl import OSV_ECOSYSTEM, normalize_name
 
 OSV = "https://api.osv.dev/v1"
@@ -35,19 +36,29 @@ def _query_ids(purls, cache_dir, offline=False):
     """purl -> [vuln ids], cached as one file per scan input."""
     key = hashlib.sha256("\n".join(sorted(purls)).encode()).hexdigest()[:16]
     cache = cache_dir / f"querybatch-{key}.json"
-    if cache.exists():
+    if cache.exists() and (offline or cache_is_fresh(cache)):
         return json.loads(cache.read_text())
     if offline:
         raise RuntimeError(f"offline and no cached query result at {cache}")
     result = {}
     for i in range(0, len(purls), BATCH):
         chunk = purls[i:i + BATCH]
-        resp = _post(f"{OSV}/querybatch", {"queries": [{"package": {"purl": p}} for p in chunk]})
+        try:
+            resp = _post(f"{OSV}/querybatch", {"queries": [{"package": {"purl": p}} for p in chunk]})
+        except Exception:
+            if cache.exists():
+                return json.loads(cache.read_text())
+            raise
         for purl, r in zip(chunk, resp["results"]):
             ids = [v["id"] for v in r.get("vulns", [])]
             token = r.get("next_page_token")
             while token:  # rare: very many vulns for one package
-                more = _post(f"{OSV}/query", {"package": {"purl": purl}, "page_token": token})
+                try:
+                    more = _post(f"{OSV}/query", {"package": {"purl": purl}, "page_token": token})
+                except Exception:
+                    if cache.exists():
+                        return json.loads(cache.read_text())
+                    raise
                 ids += [v["id"] for v in more.get("vulns", [])]
                 token = more.get("next_page_token")
             result[purl] = ids
@@ -57,12 +68,18 @@ def _query_ids(purls, cache_dir, offline=False):
 
 def _fetch_vuln(vid, cache_dir, offline=False):
     f = cache_dir / f"{vid}.json"
-    if not f.exists():
+    stale = f.exists() and not cache_is_fresh(f)
+    if not f.exists() or (not offline and stale):
         if offline:
             raise RuntimeError(f"offline and {vid} not cached")
-        f.write_text(json.dumps(_get(f"{OSV}/vulns/{vid}"), indent=1))
+        try:
+            f.write_text(json.dumps(_get(f"{OSV}/vulns/{vid}"), indent=1))
+            stale = False
+        except Exception:
+            if not f.exists():
+                raise
     raw = f.read_bytes()
-    return json.loads(raw), {"path": str(f), "sha256": hashlib.sha256(raw).hexdigest()}
+    return json.loads(raw), {"path": str(f), "sha256": hashlib.sha256(raw).hexdigest(), "stale": stale}
 
 
 def _has_severity(rec):

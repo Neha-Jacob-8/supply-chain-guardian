@@ -41,11 +41,15 @@ Without credentials every agent runs a labelled rule-based fallback, and the rep
 ## How source code, credentials and secrets are protected
 
 - Repositories are cloned from `https://github.com/` only, with git hooks disabled, no submodule recursion,
-  no credential prompts and `protocol.file.allow=never`.
+  no credential prompts and `protocol.file.allow=never`; a matching existing clone is never overwritten.
 - Repository code is never executed on the host. Lockfile regeneration uses `--ignore-scripts` inside
-  `node:22-alpine`; the app is built and booted only inside Docker containers, which are removed afterwards.
-- File excerpts given to the LLM pass through a secret-redaction filter; `read_file` refuses paths outside the
-  repository. Only excerpts, never whole repositories, are sent to the LLM.
+  `node:22-alpine` as UID 1000. Runtime builds are allowlisted by project name plus canonical remote identity,
+  and Compose host escapes are rejected before startup. Trusted test dependency setup also uses `--ignore-scripts`;
+  only the declared unit/HTTP checks execute in the container. Unknown repositories are static-only; containers are
+  torn down after a trusted check.
+- File excerpts given to the LLM pass through redaction for assignment-style API/access/secret/token/password/private
+  keys, bearer values, token prefixes, and PEM blocks; `read_file` refuses paths outside the repository. Only
+  bounded excerpts, never whole repositories, are sent to the LLM.
 - Data sent to external services: package names/versions (OSV, npm registry), CVE ids (EPSS), and code
   excerpts (Gemini / Claude APIs, only in LLM mode). Repository secrets are redacted first. API keys live in a
   git-ignored `.env`, are sent only as request headers, and never appear in logs, events or reports.
@@ -62,3 +66,5 @@ Without credentials every agent runs a labelled rule-based fallback, and the rep
 - The end-of-life table is a static snapshot.
 - The smoke test checks login only; it is evidence that a fix did not break the app's core path, not full
   test coverage.
+- Online intelligence is cached with a one-day default TTL; offline mode intentionally replays stale cache and
+  labels the run. Refresh the cache before presenting current vulnerability counts.
