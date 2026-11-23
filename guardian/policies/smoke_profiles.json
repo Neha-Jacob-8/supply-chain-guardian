@@ -1,0 +1,16 @@
+{
+  "_doc": "Runtime smoke tests per known application. Matched by npm/PyPI project name. Without a match, validation builds the repo's Dockerfile if present, otherwise it is static (rescan only).",
+  "profiles": [
+    {
+      "name": "OWASP NodeGoat",
+      "match": {"project_names": ["owasp-nodejs-goat"]},
+      "compose": true,
+      "port": 4000,
+      "checks": [
+        {"method": "GET", "path": "/login", "expect_status": [200]},
+        {"method": "POST", "path": "/login", "form": {"userName": "user1", "password": "User1_123"},
+         "expect_status": [301, 302, 303], "expect_location_endswith": "/dashboard"}
+      ]
+    }
+  ]
+}

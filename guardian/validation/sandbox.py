@@ -21,8 +21,8 @@ from ..discovery import build_inventory
 from ..intel.detectors import run_detectors
 from ..intel.osv import scan_components
 from ..intel.registry import registry_metadata
+from ..policies import load as load_policy
 
-SMOKE_USER, SMOKE_PASS = "user1", "User1_123"   # NodeGoat's seeded demo account (artifacts/db-reset.js)
 SEV = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 
@@ -43,7 +43,7 @@ def scan_tree(path, cache_dir):
     inv = build_inventory(path)
     comps = inv["components"]
     findings = scan_components(comps, cache_dir) if comps else []
-    ind, _ = run_detectors(path, inv["lockfile"], comps, history=0) if comps else ([], [])
+    ind, _ = run_detectors(path, inv, comps, history=0) if comps else ([], [])
     return comps, findings + ind
 
 
@@ -71,31 +71,53 @@ def _http(method, path, body=None, port=4000):
     return r.status, r.getheader("Location"), r.read()[:200]
 
 
-def smoke_test(work, project):
+def smoke_profile(state):
+    """The runtime check for this repo: a named profile, a plain Docker build, or None (static only)."""
+    names = {p.get("name") for p in (state.inventory or {}).get("projects", [])}
+    for prof in load_policy("smoke_profiles.json")["profiles"]:
+        if names & set(prof["match"].get("project_names", [])):
+            return prof
+    if (state.repo / "Dockerfile").exists():
+        return {"name": "docker build", "build_only": True}
+    return None
+
+
+def runtime_check(work, project, prof):
+    """Returns (steps, ok). ok is None when no runtime check applies."""
+    if prof is None:
+        return [{"name": "runtime_check", "rc": 0, "detail": "no Dockerfile or smoke profile: static validation only"}], None
+    if prof.get("build_only"):
+        r = _run(["docker", "build", "--pull=false", "-t", f"{project}:check", "."], cwd=work, timeout=1200)
+        r["name"] = "docker_build"
+        _run(["docker", "image", "rm", "-f", f"{project}:check"], timeout=120)
+        return [r], r["rc"] == 0
     steps = []
     up = _run(["docker", "compose", "-p", project, "up", "-d", "--build"], cwd=work, timeout=900)
     up["name"] = "build_and_boot"; steps.append(up)
     try:
         if up["rc"] != 0:
             return steps, False
-        status = None
-        for _ in range(40):
-            try:
-                status, _, _ = _http("GET", "/login")
-                if status == 200:
-                    break
-            except OSError:
-                pass
-            time.sleep(3)
-        steps.append({"name": "smoke_get_login", "rc": 0 if status == 200 else 1, "detail": f"GET /login -> {status}"})
-        if status != 200:
-            logs = _run(["docker", "compose", "-p", project, "logs", "--tail", "30", "web"], cwd=work)
-            steps.append({"name": "app_logs", "rc": 0, "log_tail": logs["log_tail"]})
-            return steps, False
-        body = urllib.parse.urlencode({"userName": SMOKE_USER, "password": SMOKE_PASS})
-        st, loc, _ = _http("POST", "/login", body)
-        ok = st in (301, 302, 303) and (loc or "").endswith("/dashboard")
-        steps.append({"name": "smoke_login", "rc": 0 if ok else 1, "detail": f"POST /login -> {st} Location={loc}"})
+        ok = True
+        for i, chk in enumerate(prof["checks"]):
+            status, loc = None, None
+            for _ in range(40 if i == 0 else 1):        # first check also waits for the app to come up
+                try:
+                    body = urllib.parse.urlencode(chk["form"]) if chk.get("form") else None
+                    status, loc, _ = _http(chk["method"], chk["path"], body, prof.get("port", 80))
+                    if status in chk["expect_status"]:
+                        break
+                except OSError:
+                    pass
+                time.sleep(3)
+            passed = status in chk["expect_status"] and (loc or "").endswith(chk.get("expect_location_endswith", ""))
+            steps.append({"name": f"smoke_{chk['method'].lower()}_{chk['path'].strip('/') or 'root'}",
+                          "rc": 0 if passed else 1, "detail": f"{chk['method']} {chk['path']} -> {status}"
+                          + (f" Location={loc}" if loc else "")})
+            if not passed:
+                ok = False
+                logs = _run(["docker", "compose", "-p", project, "logs", "--tail", "30"], cwd=work)
+                steps.append({"name": "app_logs", "rc": 0, "log_tail": logs["log_tail"]})
+                break
         return steps, ok
     finally:
         _run(["docker", "compose", "-p", project, "down", "-v", "--remove-orphans"], cwd=work, timeout=300)
@@ -113,9 +135,10 @@ def validate(state, cand, smoke=True, baseline_ok=True):
         (work / path).write_text(new)
     steps.append({"name": "apply_patch", "rc": 0, "detail": f"{len(cand['files'])} file(s)"})
 
-    if cand.get("needs_lockfile_regen"):
+    for pj in [p for p in cand["files"] if p.endswith("package.json")] if cand.get("needs_lockfile_regen") else []:
+        app_dir = (work / pj).parent.resolve()
         r = _run(["docker", "run", "--rm", "--memory", "2g", "--user", "1000:1000", "-e", "HOME=/tmp",
-                  "-v", f"{work.resolve()}:/app", "-w", "/app", "node:22-alpine",
+                  "-v", f"{app_dir}:/app", "-w", "/app", "node:22-alpine",
                   "npm", "install", "--package-lock-only", "--ignore-scripts", "--lockfile-version", "2",
                   "--no-audit", "--no-fund"], timeout=900)
         r["name"] = "regenerate_lockfile"; steps.append(r)
@@ -153,10 +176,12 @@ def validate(state, cand, smoke=True, baseline_ok=True):
     smoke_ok = None
     if smoke:
         project = "gv" + hashlib.sha1(cid.encode()).hexdigest()[:8]
-        s_steps, smoke_ok = smoke_test(work, project)
+        s_steps, smoke_ok = runtime_check(work, project, smoke_profile(state))
         steps += s_steps
     if summary is not None:
         summary["smoke"] = {"baseline_ok": baseline_ok, "after_ok": smoke_ok}
+    if summary is not None:
+        summary["runtime_check"] = (smoke_profile(state) or {}).get("name", "static only")
     if smoke and smoke_ok is False and baseline_ok:
         verdict = "failed"                      # the fix broke a working app
     elif smoke and smoke_ok is False:
@@ -176,8 +201,9 @@ def _result(state, cand, steps, summary, verdict):
 
 
 def baseline_smoke(state):
-    """Prove the smoke test passes on the unmodified app, so a failure later means something."""
+    """Run the same runtime check on the unmodified app, so a failure later means something."""
+    prof = smoke_profile(state)
     work = _copy(state.repo, state.out / "validation" / "baseline_app")
-    steps, ok = smoke_test(work, "gvbaseline")
-    state.log("validation_agent", "baseline_smoke", {"ok": ok})
-    return {"ok": ok, "steps": steps}
+    steps, ok = runtime_check(work, "gvbaseline", prof)
+    state.log("validation_agent", "baseline_smoke", {"ok": ok, "profile": (prof or {}).get("name", "static only")})
+    return {"ok": True if ok is None else ok, "profile": (prof or {}).get("name", "static only"), "steps": steps}
