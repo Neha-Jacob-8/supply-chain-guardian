@@ -58,7 +58,7 @@ function renderPipeline() {
     return `<div class="stage ${cls}">${String(i + 1).padStart(2, '0')} ${label}</div>`;
   }).join('');
   const mode = st.llm_mode;
-  $('#modeChip').textContent = mode ? (mode === 'none' ? 'Rule-based agents' : `Claude agents`) : 'No run yet';
+  $('#modeChip').textContent = mode ? (mode === 'none' ? 'Rule-based agents' : `${mode} agents`) : 'No run yet';
   $('#repoName').textContent = st.repo || st.target || '';
   $('#runBtn').disabled = !!running;
   $('#runBtn').textContent = running ? (st.phase === 'cloning' ? 'Cloning…' : 'Running…') : 'Analyse';
@@ -203,7 +203,8 @@ function drawNetwork() {
       ctx.globalAlpha = dim ? 0.18 : 1;
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 2 * Math.PI); ctx.fillStyle = nodeColor(n); ctx.fill();
       if (n.type || S.selNode === n.id) { ctx.lineWidth = 2 / scale; ctx.strokeStyle = S.selNode === n.id ? css('--accent') : css('--bg'); ctx.stroke(); }
-      const showLabel = n.type || S.hlNodes.has(n.id) || ($('#nLabels').checked && scale > 1.6) || scale > 4.5;
+      const manyProjects = (S.netData?.roots.length || 0) > 9;
+      const showLabel = n.type === 'root' || (n.type === 'project' && (!manyProjects || scale > 2.2)) || S.hlNodes.has(n.id) || ($('#nLabels').checked && scale > 1.6) || scale > 4.5;
       if (showLabel) {
         const label = n.type ? (n.name || short(n.id)) : n.name;
         ctx.font = `${(n.type ? 12 : 10) / Math.max(scale, 0.6)}px IBM Plex Mono, monospace`;
@@ -216,7 +217,7 @@ function drawNetwork() {
     .onBackgroundClick(() => { S.selNode = null; S.hlNodes = new Set(); S.hlLinks = new Set(); refreshLinks(); renderSide(); })
     .cooldownTicks(big ? 120 : 250).warmupTicks(big ? 40 : 10);
   FG.d3Force('charge').strength(big ? -14 : -38);
-  FG.d3Force('link').distance(l => (l.source.type ? 50 : 22)).strength(0.6);
+  FG.d3Force('link').distance(l => (l.source.type === 'root' ? 110 : l.source.type ? 50 : 22)).strength(l => (l.source.type === 'root' ? 0.25 : 0.6));
   FG.onEngineStop(() => { if (!S.fitted) { FG.zoomToFit(600, 40); S.fitted = true; } });
   S.fitted = false;
   renderLegend();

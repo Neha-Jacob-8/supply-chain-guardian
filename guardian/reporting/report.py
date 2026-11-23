@@ -29,7 +29,8 @@ def write(state):
     (s.out / "report.json").write_text(json.dumps(data, indent=2, default=str))
 
     L = [f"# Guardian Security Report", "", f"- Repository: `{s.repo}`",
-         f"- Agents ran with: **{'Claude (' + s.llm_mode + ')' if s.llm_mode != 'none' else 'rule-based fallback, no LLM'}**",
+         f"- Agents ran with: **{'LLM: ' + s.llm_mode if s.llm_mode != 'none' else 'rule-based fallback, no LLM'}** "
+         f"(per-agent mode is shown with each priority/investigation)",
          f"- Components: {len(s.comps)} ({data['inventory'].get('direct', 0)} direct, {data['inventory'].get('transitive', 0)} transitive; "
          f"{data['inventory'].get('scope_prod', 0)} prod, {data['inventory'].get('scope_dev', 0)} dev)",
          f"- Findings: {len(vuln)} vulnerability advisories (verified, OSV) + {len(ind)} supply-chain indicators (rule-based)", ""]
