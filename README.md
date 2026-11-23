@@ -1,206 +1,129 @@
 # Software Supply Chain Guardian
 
-Agentic AI platform for software supply-chain security analysis (hackathon prototype).
+An agentic AI system that takes any public GitHub repository from **discovery** to **independently validated
+remediation**: it maps the full dependency network, finds known vulnerabilities and suspicious supply-chain changes,
+lets AI agents investigate and prioritise them, proposes fixes for human approval, and verifies each approved fix in
+a sandbox before reporting.
 
-Day 1 status: **discovery, dependency matrix and detection**. A deterministic pipeline that turns a
-repository into a Dependency Matrix, CycloneDX SBOM, dependency graph, OSV-backed vulnerability findings
-and non-CVE supply-chain indicators (lockfile tampering, untrusted sources, containers, CI/CD), each with
-evidence. The Day 2 agents will call it as a tool.
+![Architecture](docs/architecture.svg)
 
-Docs: [architecture](docs/architecture.md) (all six flowcharts) · [Responsible AI & security note](docs/responsible-ai.md) · [demo script](docs/demo.md) · [original plan](docs/original-plan.md)
+**Principle:** evidence comes from deterministic tools; AI agents interpret it. Scores and verdicts are computed, never
+generated. Every fix needs human approval and independent validation.
 
-## Agentic pipeline (Day 2)
-
-```
-Guardian Orchestrator (state machine, shared RunState, audit trail in output/events.jsonl)
-  1 Discovery     deterministic tools: inventory, SBOM, matrix, OSV, detectors, risk scores, fix candidates
-  2 Attack agent  Red Team: read-only investigation of suspicious indicators (registry + git + file evidence)
-  3 Risk agent    prioritises using the formula scores + investigations; explains, never re-scores
-  4 Defense agent Blue Team: chooses among deterministic fix candidates; cannot invent fixes
-    Human approval gate: nothing is applied without it
-  5 Validation    independent, deterministic: apply in a copy, rebuild lockfile in Docker, rescan,
-                  boot + login smoke test, compare with its own baseline -> verified / partial / failed
-    Orchestrator re-plans when a fix fails (proposes an alternative, which again needs approval)
-  Guardian Security Report: output/report.md + output/report.json
-```
+## Quick start
 
 ```bash
-guardian run targets/NodeGoat                 # stops at the approval gate
-guardian approve --ids FIX-...,FIX-...        # human decision (or --ids low / all, --reject)
-guardian resume targets/NodeGoat              # independent validation + report
-# options: --llm auto|claude|none   --approve low|all|none|<ids>   --no-smoke   --offline
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[all]"
+cp .env.example .env          # add GEMINI_API_KEYS (and/or ANTHROPIC_API_KEY); without keys agents run rule-based
+guardian serve                # open http://127.0.0.1:8000, paste a GitHub URL, press Analyse
 ```
 
-Guardrails enforced in code: agents only have read-only tools; every tool call is stored as evidence
-(`output/evidence/EV-*.json`); a submitted result is rejected unless every cited finding/evidence id exists and
-every CVE/GHSA it mentions was reported by OSV (the agent gets the rejection and must correct itself); risk scores
-come from `guardian/risk.py`, never from the LLM; the Defense agent can only pick candidate ids from
-`guardian/remediation.py`; only the Validation step produces verdicts. LLM: `claude-opus-5-5` (override with
-`GUARDIAN_MODEL`).
-
-## Dashboard
+Command line:
 
 ```bash
-guardian serve                    # then open http://127.0.0.1:8000
+guardian scan https://github.com/OWASP/NodeGoat      # inventory, SBOM, matrix, vulnerabilities, indicators
+guardian run  https://github.com/OWASP/NodeGoat      # full agentic pipeline; pauses at the approval gate
+guardian approve --ids FIX-...,FIX-...               # human decision (or --ids low | all, --reject)
+guardian resume targets/NodeGoat                     # independent validation + report
 ```
 
-Paste any public GitHub URL and press **Analyse**. The dashboard shows live pipeline progress and then:
-overview, a force-directed **dependency network** (click a package to trace its path from the project root;
-filter to prod-only or risky paths), the Dependency Matrix, findings with evidence and risk breakdown, agent
-investigations and priorities, remediation proposals with diffs and **approve / reject**, independent validation
-results, the live audit trail, the report and coverage gaps.
+Options: `--llm auto|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip Docker boot test),
+`--history N` (lockfile commits to compare).
+
+## What it does
+
+| Stage | Who | Output |
+|---|---|---|
+| Ingestion | code | safe clone (github.com only, hooks off, no submodules), repository files only (`git ls-files`) |
+| 1 Discovery & detection | deterministic tools | dependency network across 9 ecosystems, CycloneDX SBOM, Dependency Matrix, OSV vulnerabilities, non-CVE indicators, risk scores, fix candidates, coverage gaps |
+| 2 Attack agent (Red Team) | LLM + read-only tools | investigations of suspicious indicators with attack paths, verified facts vs inference |
+| 3 Risk analysis agent | LLM + read-only tools | ranked priorities with rationale (scores stay formula-based) |
+| 4 Defense agent (Blue Team) | LLM + read-only tools | fix proposals chosen from computed candidates; patch-less fixes escalate to a human |
+| Approval gate | human | approve / reject each fix (dashboard or CLI) |
+| 5 Validation agent | deterministic | patch a copy, regenerate lockfile in Docker, rescan, boot + smoke test → verified / partial / failed |
+| Report | code | `report.md` + `report.json`, audit trail in `events.jsonl` |
+
+Details: [docs/implementation.md](docs/implementation.md) · flowcharts: [docs/architecture.md](docs/architecture.md) ·
+[Responsible AI & security note](docs/responsible-ai.md) · [demo script](docs/demo.md)
 
 ## Supported ecosystems
 
 | Ecosystem | Files | Graph |
 |---|---|---|
-| npm | `package-lock.json` / `npm-shrinkwrap.json`, `pnpm-lock.yaml` (workspaces), `yarn.lock` (v1), `package.json` | full / full / full / declared only |
-| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges), `pyproject.toml` | full / full / flat / pins (+edges) / declared only |
-| Go | `go.mod` | direct + indirect (indirect parents unknown) |
-| Rust | `Cargo.lock` (+ `Cargo.toml` for dev deps) | full |
+| npm | `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (workspaces), `yarn.lock` v1, `package.json` | full (declared only without a lockfile) |
+| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges), `pyproject.toml` | full / flat / declared |
+| Go | `go.mod` | direct + indirect |
+| Rust | `Cargo.lock` (+ `Cargo.toml` dev deps) | full |
 | Ruby | `Gemfile.lock` | full |
-| PHP | `composer.lock`, `composer.json` | full / declared only |
-| Java | `pom.xml` | declared only (transitive needs `mvn dependency:tree`) |
-| ROS | `package.xml` | declared rosdep keys (no versions) |
+| PHP | `composer.lock`, `composer.json` | full / declared |
+| Java | `pom.xml` | declared |
+| ROS | `package.xml` | declared rosdep keys |
 | Git | `.repos` (vcstool), `.gitmodules` | declared |
 
-Monorepos: every manifest becomes a project node under one repository root. Anything that cannot be
-resolved (unpinned ranges, missing lockfiles, Gradle, C/C++ build files) is listed under coverage gaps.
-Only files that belong to the repository are scanned (`git ls-files`, so `.gitignore`d folders are skipped), and
-test fixtures / vendored code are excluded.
+Monorepos become one network with a node per project. Anything unresolved (ranges, missing lockfiles, Gradle,
+C/C++ build files) is listed as a coverage gap rather than guessed. Tested on 20 public repositories across all of
+the above, including pnpm monorepos, an empty repository and offline runs.
 
-## LLM providers and key fallback
+## LLM providers
 
-Agents run on whichever providers have credentials, configured in `.env` (git-ignored) or the environment:
-
-```bash
-GEMINI_API_KEYS=key1,key2,key3      # tried in order; also GEMINI_API_KEY, GEMINI_API_KEY_1..9
-GUARDIAN_GEMINI_MODELS=gemini-3.5-flash,gemini-flash-latest,gemini-3.5-flash-lite   # optional override
-ANTHROPIC_API_KEY=...               # optional; Claude is tried first when present
-```
-
-`--llm auto` (default) uses every configured provider in order (Claude, then Gemini); `--llm gemini` or
-`--llm claude` pins one; `--llm none` forces the rule-based agents. For Gemini, each request walks keys in order and,
-per key, models in order: an invalid key is dropped for the run, a retired model (404) is dropped for all keys,
-quota errors (429) move to the next model/key, overload (5xx) is retried once with backoff. If every key and model
-fails, the agent restarts on the next provider, and finally uses its labelled rule-based fallback. Keys travel only
-in the request header and are never written to logs, events or reports; the audit trail records which key number
-(`#1`, `#2`) and model answered.
-
-## Dashboard API
-
-```bash
-guardian serve --port 8000        # http://127.0.0.1:8000/docs for interactive API docs
-```
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/status`, `/api/overview` | run stage, counts |
-| GET | `/api/matrix`, `/api/graph`, `/api/sbom` | Dependency Matrix (filters: `risk_status`, `scope`, `q`), graph, CycloneDX |
-| GET | `/api/findings`, `/api/findings/{id}` | findings with `risk` breakdown (filters: `category`, `severity`, `rule_id`, `component`) |
-| GET | `/api/investigations`, `/api/priorities`, `/api/proposals[/{id}]`, `/api/validations`, `/api/escalations` | agent outputs |
-| GET | `/api/evidence/{EV-id}`, `/api/events?since=`, `/api/coverage`, `/api/changes` | evidence, audit trail, gaps, lockfile history |
-| GET | `/api/report.md`, `/api/report.json` | Guardian Security Report |
-| POST | `/api/runs` `{"target": "<path or GitHub URL>", "llm": "auto"}` | start a run (background) |
-| POST | `/api/proposals/{id}/approval` `{"decision": "approve"}` | human approval |
-| POST | `/api/resume` | validate approved fixes + report |
-
-## Requirements
-
-- Python 3.11+ (core needs only PyYAML, for pnpm lockfiles; Claude agents: `anthropic`; Gemini uses plain HTTP)
-- Docker (validation only)
-- Network access to `api.osv.dev` for the first scan (later scans can run with `--offline`)
-
-## Install
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[all]"          # [llm] Claude agents, [api] dashboard server; `pip install -e .` = stdlib-only pipeline
-cp .env.example .env              # then add your keys (the file is git-ignored)
-```
-
-## Quick start
-
-```bash
-# GitHub URLs are cloned safely into targets/ (hooks disabled, no submodules); local paths also work
-guardian scan https://github.com/OWASP/NodeGoat
-
-guardian scan targets/NodeGoat            # live OSV lookups, cached to output/cache/osv
-guardian scan targets/NodeGoat --offline  # cache only (demo mode)
-guardian scan targets/NodeGoat --no-vulns # skip OSV
-guardian scan targets/NodeGoat --history 0 # skip lockfile git history
-```
-
-### "What changed" demo
-
-`scripts/seed_demo.py` creates a **local** branch `guardian-demo` in the target clone with one commit that
-simulates a lockfile tamper (express's integrity hash replaced at the same version; body-parser pointed at a
-`.example` mirror that cannot resolve). Nothing is pushed.
-
-```bash
-python3 scripts/seed_demo.py targets/NodeGoat     # creates and checks out guardian-demo
-guardian scan targets/NodeGoat --offline
-git -C targets/NodeGoat checkout master           # back to the original
-```
-
-### Tests
-
-```bash
-python -m unittest discover -s tests -t .
-```
+Configured in `.env` (git-ignored). `GEMINI_API_KEYS=k1,k2,k3` are tried in order; per key, models are tried in order
+(`gemini-3.5-flash` → `gemini-flash-latest` → lite models, override with `GUARDIAN_GEMINI_MODELS`). Invalid keys are
+dropped, retired models skipped, quota errors move to the next model/key, overload is retried. If every key and
+model fails, the agent restarts on the next provider (Claude, if `ANTHROPIC_API_KEY` is set) and finally runs its
+labelled rule-based fallback, so the pipeline always completes. Keys are sent only as request headers and never logged.
 
 ## Outputs (`output/`)
 
 | File | Contents |
 |---|---|
-| `matrix.csv` / `matrix.json` | Dependency Matrix: one row per unique `name@version` with ID (purl), ecosystem, direct/transitive, prod/dev, parent, full dependency path, source, license, advisory IDs, CVSS, severity, affected range, fixed version, risk status |
+| `matrix.csv` / `matrix.json` | Dependency Matrix: purl, ecosystem, direct/transitive, prod/dev, parent, full path, source, license, advisories, CVSS, severity, affected range, fixed version, risk status |
 | `sbom.cdx.json` | CycloneDX 1.5 SBOM with hashes, sources and the dependency tree |
-| `graph.json` | Nodes and edges for visualisation |
-| `findings.json` | All findings. Vulnerabilities (`evidence_class: verified`): one per component × advisory with CVSS vector, range, fix, path and the cached OSV record + SHA-256. Indicators (`evidence_class: indicator`): rule ID, file/line or commit, excerpt, SHA-256 and recommendation |
-| `lockfile_changes.json` | Per-commit lockfile change summary (added / removed / version changes / hash-algorithm upgrades) |
-| `components.json` | Full component records |
-| `coverage_gaps.json` | What could not be resolved and why |
+| `graph.json` | network nodes (repo, projects, packages) and edges |
+| `findings.json` | vulnerabilities (verified, OSV) and indicators (rule-based), each with evidence and a risk breakdown |
+| `run_state.json`, `events.jsonl`, `evidence/` | agent outputs, approvals, verdicts; audit trail; cited evidence |
+| `report.md` / `report.json` | Guardian Security Report |
 
-## Package layout
+## Repository layout
 
 ```
 guardian/
-  cli.py, __main__.py        `guardian` command (scan | run | approve | resume)
-  models.py                  shared data model (Component, CoverageGap)
-  pipeline.py                Day 1 discovery + detection pipeline (used by `scan` and the Discovery stage)
-  discovery/                 lockfile.py (npm lockfile, Node-style resolution), graph.py (paths, scope),
-                             sbom.py (CycloneDX 1.5), matrix.py (Dependency Matrix), inventory.py (build_inventory)
-  ingestion.py               validate GitHub URL + safe clone
-  api.py                     FastAPI dashboard server (`guardian serve`)
-  intel/                     osv.py (OSV + CVSS), detectors.py (SC/MT/CT/CI rules), risk.py (scoring, KEV/EPSS,
-                             reachability), registry.py (npm registry metadata, git ref -> SHA)
-  remediation/               candidates.py: deterministic fix candidates with diffs, compat notes, rollback
-  validation/                sandbox.py: apply in a copy, Docker lockfile regen, rescan, boot + login smoke test
-  reporting/                 report.py: report.json + report.md
-  agents/                    orchestrator.py, base.py (agent loop + citation guardrail), llm.py (Claude / scripted),
-                             state.py (RunState + evidence store), tools.py (read-only agent tools),
-                             attack.py, risk_analyst.py, defense.py, common.py
-  agents/prompts/*.md        agent system prompts (package data)
-  policies/*.json            rule weights and end-of-life dates (package data, editable without code changes)
-scripts/seed_demo.py         local "what changed" tamper demo
-tests/                       unit tests (no network, no API key needed)
+  cli.py, api.py, config.py      CLI, REST API (FastAPI), .env loading
+  ingestion.py                   GitHub URL validation and safe clone
+  pipeline.py                    discovery + detection pipeline
+  discovery/                     ecosystem parsers, network assembly, SBOM, matrix
+  intel/                         OSV, detectors, risk scoring, registry lookups
+  remediation/                   deterministic fix candidates
+  agents/                        orchestrator, agent loop + guardrails, tools, state, Gemini/Claude backends, 3 agents
+  agents/prompts/                agent system prompts (package data)
+  validation/                    Docker sandbox validation
+  reporting/                     report generator
+  policies/                      risk weights, end-of-life dates, smoke profiles (editable data)
+  web/                           dashboard (HTML/CSS/JS, served by `guardian serve`)
+scripts/seed_demo.py             local lockfile-tamper demo branch
+tests/                           33 unit tests (no network, no API key)
+docs/                            architecture, implementation, responsible AI, demo
 ```
 
-## Known limitations
+## Tests
 
-- Lockfile git-history checks (SC1) cover npm lockfiles only; automatic fix patches cover npm and pinned
-  Python requirements, other ecosystems get exact manual upgrade instructions.
-- Many lockfiles omit licenses; reported as a coverage gap.
-- Runtime validation: apps with a smoke profile (`policies/smoke_profiles.json`) are booted and tested; other repos
-  get a `docker build` when a Dockerfile exists, otherwise static validation (rescan) only.
-- Vulnerabilities come from OSV only. Advisories without a CVSS v3 vector use the advisory's own severity label.
-- Fixed versions come from OSV and are not yet checked for availability or compatibility.
-- Indicators are heuristics, not proof of compromise. SC1 compares hashes of the same algorithm only, so npm's
-  sha1 to sha512 re-records are logged as benign changes, not findings.
-- The end-of-life table in `detectors.py` is a static snapshot and needs refreshing.
-- No typosquatting or dependency-confusion detection yet.
+```bash
+python -m unittest discover -s tests -t .
+```
+
+CI runs them on every push (GitHub Actions, SHA-pinned, read-only token).
 
 ## Safety
 
-Target repositories are cloned with git hooks disabled and are never executed on the host.
-Anything that installs or runs target code happens in Docker only.
+Only public `github.com` repositories are cloned, with git hooks disabled. Target code never runs on the host:
+lockfile regeneration uses `--ignore-scripts` and builds run in Docker as a non-root user. Repository secrets are
+redacted before anything reaches an LLM. Nothing is merged, pushed or deployed automatically.
+
+## Known limitations
+
+- Reachability is package-level (is the package imported), not function-level.
+- Automatic patches cover npm and pinned Python requirements; other ecosystems get exact manual instructions.
+- Lockfile history ("what changed") is analysed for npm lockfiles.
+- Runtime validation uses a smoke profile when one exists (`policies/smoke_profiles.json`), otherwise a Docker build,
+  otherwise static rescan only.
+- Indicators are heuristics, not proof of compromise; the end-of-life table is a static snapshot.
