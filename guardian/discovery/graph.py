@@ -1,7 +1,7 @@
 """Part 3: collapse instances to unique name@version nodes, compute direct/transitive + shortest paths."""
 from collections import deque
 from .lockfile import pkg_name, make_purl, resolve
-from .models import Component, CoverageGap
+from ..models import Component, CoverageGap
 
 
 def build_components(packages: dict, edges: dict, root_name: str, root_version: str):
