@@ -1,11 +1,11 @@
-"""Discovery tool: repo path -> inventory (components, graph, SBOM, matrix, gaps).
+"""Inventory: repo path -> inventory (components, graph, SBOM, matrix, gaps).
 Deterministic; the Day 2 Discovery agent calls build_inventory() as a tool."""
 from dataclasses import asdict
 from pathlib import Path
 from .lockfile import load_lockfile, build_instance_edges
 from .graph import build_components
 from .sbom import build_sbom
-from .models import CoverageGap
+from ..models import CoverageGap
 
 SUPPORTED = {"package-lock.json"}
 KNOWN_UNSUPPORTED = {"yarn.lock", "pnpm-lock.yaml", "requirements.txt", "poetry.lock", "Pipfile.lock",
