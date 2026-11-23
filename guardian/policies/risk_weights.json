@@ -1,0 +1,26 @@
+{
+  "_doc": "Base points per indicator rule (0-100 scale). Vulnerability formula weights are documented in intel/risk.py.",
+  "indicator_rule_base": {
+    "SC1": 70,
+    "SC2": 55,
+    "SC3": 15,
+    "SC4": 35,
+    "MT1": 12,
+    "CT1": 30,
+    "CT2": 55,
+    "CT3": 35,
+    "CT4": 60,
+    "CT5": 25,
+    "CI1": 35,
+    "CI2": 30,
+    "CI3": 65,
+    "CI4": 70,
+    "SC5": 65
+  },
+  "label_to_cvss": {
+    "CRITICAL": 9.5,
+    "HIGH": 7.5,
+    "MEDIUM": 5.0,
+    "LOW": 2.5
+  }
+}
