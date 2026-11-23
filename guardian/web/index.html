@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supply Chain Guardian</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark"></span>Supply Chain Guardian</div>
+  <form id="runForm" class="runform" autocomplete="off">
+    <input id="target" type="text" spellcheck="false" placeholder="https://github.com/owner/repo" aria-label="GitHub repository URL">
+    <select id="llm" aria-label="Agent mode"><option value="auto">Agents: auto</option><option value="claude">Agents: Claude</option><option value="none">Agents: rule-based</option></select>
+    <button id="runBtn" class="btn primary" type="submit">Analyse</button>
+  </form>
+  <div class="status"><span id="modeChip" class="chip"></span><span id="repoName" class="mono muted"></span></div>
+</header>
+
+<div id="pipeline" class="pipeline"></div>
+<div id="banner" class="banner" hidden></div>
+
+<div class="shell">
+  <nav class="rail" id="rail">
+    <a data-view="overview">Overview</a>
+    <a data-view="network">Dependency network</a>
+    <a data-view="matrix">Dependency matrix</a>
+    <a data-view="findings">Findings</a>
+    <a data-view="agents">Agents</a>
+    <a data-view="remediation">Remediation <span id="pendingCount" class="count"></span></a>
+    <a data-view="validation">Validation</a>
+    <a data-view="activity">Activity</a>
+    <a data-view="report">Report</a>
+    <a data-view="coverage">Coverage</a>
+  </nav>
+
+  <main id="main">
+    <section class="view" id="v-overview">
+      <div class="kpis" id="kpis"></div>
+      <div class="grid2">
+        <div class="panel"><h3>Findings by risk</h3><div id="sevBar" class="sevbar"></div><div id="sevLegend" class="legend"></div>
+          <h3 class="mt">Projects</h3><table class="tbl" id="projects"></table></div>
+        <div class="panel"><h3>Top priorities</h3><ol id="topPri" class="pri"></ol></div>
+      </div>
+      <div class="panel"><h3>What changed (lockfile history)</h3><div id="changes" class="timeline"></div></div>
+    </section>
+
+    <section class="view" id="v-network">
+      <div class="toolbar">
+        <input id="nSearch" list="nList" placeholder="Find a package…" spellcheck="false"><datalist id="nList"></datalist>
+        <div class="seg" id="nShow">
+          <button data-v="all">All</button><button data-v="prod">Prod only</button><button data-v="vuln">Risky paths</button>
+        </div>
+        <select id="nEco"><option value="">All ecosystems</option></select>
+        <label class="tog"><input type="checkbox" id="nLabels"> Labels</label>
+        <button class="btn" id="nFit">Fit</button>
+        <span id="nStats" class="muted"></span>
+      </div>
+      <div class="netwrap">
+        <div id="net"></div>
+        <aside class="side" id="nSide"><p class="muted">Click a node to trace its path from the project root.</p></aside>
+        <div class="netlegend" id="nLegend"></div>
+      </div>
+    </section>
+
+    <section class="view" id="v-matrix">
+      <div class="toolbar">
+        <input id="mQ" placeholder="Search packages…" spellcheck="false">
+        <select id="mStatus"><option value="">Any status</option><option>vulnerable</option><option>suspicious</option><option>maintenance</option><option>clean</option><option>not-scanned</option></select>
+        <select id="mRel"><option value="">Direct + transitive</option><option>direct</option><option>transitive</option></select>
+        <select id="mScope"><option value="">Prod + dev</option><option>prod</option><option>dev</option></select>
+        <select id="mEco"><option value="">All ecosystems</option></select>
+        <span id="mCount" class="muted"></span>
+        <a class="btn" id="mCsv" href="#">Export CSV</a>
+      </div>
+      <div class="tablewrap"><table class="tbl dense" id="mTable"></table></div>
+      <button class="btn more" id="mMore" hidden>Show more</button>
+    </section>
+
+    <section class="view" id="v-findings">
+      <div class="toolbar">
+        <select id="fCat"><option value="">All categories</option><option>vulnerability</option><option>suspicious</option><option>maintenance</option><option>container</option><option>ci</option></select>
+        <select id="fSev"><option value="">Any risk</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select>
+        <input id="fQ" placeholder="Filter by package or rule…" spellcheck="false">
+        <span id="fCount" class="muted"></span>
+      </div>
+      <div class="split"><div class="list" id="fList"></div><div class="detail panel" id="fDetail"><p class="muted">Select a finding.</p></div></div>
+    </section>
+
+    <section class="view" id="v-agents">
+      <div class="panel"><h3>Risk Analysis agent: priorities <span id="riskMode" class="chip ghost"></span></h3><p id="riskSummary" class="muted"></p><table class="tbl" id="priTable"></table></div>
+      <h3 class="sect">Attack agent (Red Team): investigations <span id="redMode" class="chip ghost"></span></h3>
+      <div id="invs" class="cards"></div>
+    </section>
+
+    <section class="view" id="v-remediation">
+      <p class="note">Nothing is applied without approval. Each approved fix is validated independently; the Defense agent cannot mark its own fix successful.</p>
+      <div id="props" class="cards"></div>
+      <div id="escs"></div>
+      <div class="sticky"><span id="approvedCount" class="muted"></span><button class="btn primary" id="validateBtn" disabled>Run independent validation</button></div>
+    </section>
+
+    <section class="view" id="v-validation"><div id="vals"></div></section>
+
+    <section class="view" id="v-activity">
+      <div class="toolbar"><select id="aActor"><option value="">All actors</option></select><span class="muted">Live audit trail (events.jsonl)</span></div>
+      <div class="tablewrap"><table class="tbl dense mono" id="events"></table></div>
+    </section>
+
+    <section class="view" id="v-report"><div class="toolbar"><a class="btn" href="/api/report.json" target="_blank" rel="noopener">Download JSON</a></div><article id="report" class="md panel"></article></section>
+
+    <section class="view" id="v-coverage"><div class="panel"><h3>Coverage gaps</h3><p class="muted">What the Guardian could not resolve, and why. Reported instead of guessed.</p><div id="gaps"></div></div></section>
+  </main>
+</div>
+
+<div id="drawer" class="drawer" hidden><div class="dhead"><b id="dTitle"></b><button class="btn" id="dClose">Close</button></div><pre id="dBody" class="mono"></pre></div>
+<script src="https://cdn.jsdelivr.net/npm/force-graph@1.52.0/dist/force-graph.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
