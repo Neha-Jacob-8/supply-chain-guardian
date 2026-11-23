@@ -46,8 +46,7 @@ def redact(text):
     return SECRET.sub(lambda m: m.group(1) + "[REDACTED]" + m.group(3), text)
 
 
-def _short(cid):
-    return (cid or "").split("pkg:npm/", 1)[-1].replace("%40", "@")
+from ..discovery.purl import short as _short
 
 
 def _find_comp(state, component):
@@ -117,7 +116,10 @@ def get_component(state, component):
 @tool("check_import_usage", "Where application code (outside node_modules) requires/imports a package. "
       "Package-level reachability evidence.", {"package": {"type": "string"}})
 def check_import_usage(state, package):
-    hits = import_usage(state.repo, [package])[package]
+    eco = next((c.ecosystem for c in state.comps.values() if c.name == package), "npm")
+    hits = import_usage(state.repo, [package], eco)[package]
+    if hits is None:
+        return {"package": package, "error": f"import analysis is not supported for {eco}"}
     lines = []
     for h in hits[:15]:
         path, ln = h.rsplit(":", 1)

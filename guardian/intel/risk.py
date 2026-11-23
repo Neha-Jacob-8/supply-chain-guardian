@@ -70,30 +70,64 @@ def load_intel(cves, cache_dir, offline=False):
 
 # ---------- package-level reachability ----------
 
-def import_usage(repo, names):
-    """name -> [file:line] where app code (not node_modules) requires/imports the package."""
+PY_MODULE = {"pyyaml": "yaml", "beautifulsoup4": "bs4", "pillow": "PIL", "scikit-learn": "sklearn",
+             "python-dateutil": "dateutil", "opencv-python": "cv2", "protobuf": "google.protobuf",
+             "pyjwt": "jwt", "python-dotenv": "dotenv", "pycryptodome": "Crypto", "attrs": "attr", "msgpack-python": "msgpack"}
+SKIP = {"node_modules", ".git", "vendor", "target", ".venv", "venv", "site-packages", "dist", "build"}
+
+
+def _patterns(eco, name):
+    """(file suffixes, regex) that show application code importing the package."""
+    q = re.escape
+    if eco == "npm":
+        return (".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"), re.compile(
+            r"""(require\(\s*|from\s+|import\s+)['"]""" + q(name) + r"""(/[^'"]*)?['"]""")
+    if eco == "pypi":
+        mod = PY_MODULE.get(name, name.replace("-", "_"))
+        return (".py",), re.compile(r"^\s*(import|from)\s+" + q(mod) + r"(\.|\s|$)", re.I)
+    if eco == "golang":
+        return (".go",), re.compile(r'"' + q(name) + r'(/[^"]*)?"')
+    if eco == "cargo":
+        crate = name.replace("-", "_")
+        return (".rs",), re.compile(r"\b(use\s+|extern\s+crate\s+)?" + q(crate) + r"::|extern\s+crate\s+" + q(crate))
+    if eco == "gem":
+        return (".rb", ".gemspec"), re.compile(r"""require\s+['"]""" + q(name) + r"""(/[^'"]*)?['"]""")
+    return None, None
+
+
+def import_usage(repo, names, ecosystem="npm"):
+    """name -> [file:line] where app code imports the package, or None when this ecosystem is not supported."""
+    return import_usage_multi(repo, {(ecosystem, n) for n in names}, as_names=True)
+
+
+def import_usage_multi(repo, keys, as_names=False):
+    """{(ecosystem, name)} -> {(ecosystem, name): [file:line] | None (unsupported ecosystem)}."""
     repo = Path(repo)
-    pats = {n: re.compile(r"""(require\(\s*|from\s+|import\s+)['"]""" + re.escape(n) + r"""(/[^'"]*)?['"]""") for n in names}
-    hits = {n: [] for n in names}
-    for p in repo.rglob("*"):
-        rel = p.relative_to(repo)
-        if p.suffix not in (".js", ".mjs", ".cjs", ".ts") or {"node_modules", ".git"} & set(rel.parts):
-            continue
-        try:
-            for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
-                for n, pat in pats.items():
-                    if pat.search(line):
-                        hits[n].append(f"{rel}:{i}")
-        except OSError:
-            continue
-    return hits
+    pats = {k: _patterns(*k) for k in keys}
+    hits = {k: ([] if pats[k][1] else None) for k in keys}
+    active = {k: v for k, v in pats.items() if v[1]}
+    suffixes = {sfx for v in active.values() for sfx in v[0]}
+    if active:
+        for p in repo.rglob("*"):
+            rel = p.relative_to(repo)
+            if p.suffix not in suffixes or SKIP & set(rel.parts) or not p.is_file():
+                continue
+            try:
+                lines = p.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for k, (sfx, pat) in active.items():
+                if p.suffix in sfx:
+                    for i, line in enumerate(lines, 1):
+                        if pat.search(line):
+                            hits[k].append(f"{rel}:{i}")
+    return {k[1]: v for k, v in hits.items()} if as_names else hits
 
 
 # ---------- scoring ----------
 
 def score_all(findings, comps, repo, intel_cache, offline=False):
-    direct_names = sorted({c.name for c in comps.values() if c.relationship == "direct"})
-    usage = import_usage(repo, direct_names)
+    usage = import_usage_multi(repo, {(c.ecosystem, c.name) for c in comps.values() if c.relationship == "direct"})
     cves = sorted({c for f in findings for c in f.get("cves", [])})
     kev, epss = load_intel(cves, intel_cache, offline)
     out = {}
@@ -106,8 +140,14 @@ def score_all(findings, comps, repo, intel_cache, offline=False):
 def _reach(c, usage):
     if c is None or c.scope != "prod" or len(c.path) < 2:
         return 0, "not in prod path", True
-    direct = c.path[1].split("pkg:npm/", 1)[-1].replace("%40", "@").rsplit("@", 1)[0]
-    hits = usage.get(direct, [])
+    anc = c if c.relationship == "direct" else None
+    direct = c.name if anc else None
+    if not anc:
+        from ..discovery.purl import short
+        direct = short(c.path[1]).rsplit("@", 1)[0] if "@" in short(c.path[1])[1:] else short(c.path[1])
+    hits = usage.get((c.ecosystem, direct))
+    if hits is None:
+        return 0, f"reachability not analysed for {c.ecosystem}", False
     if c.relationship == "direct":
         return (15, f"imported by app code ({len(hits)} sites, e.g. {hits[0]})", True) if hits else \
                (0, "direct dependency but no import found in app code", True)

@@ -3,8 +3,7 @@ import json
 from collections import Counter
 
 
-def _short(cid):
-    return (cid or "").split("pkg:npm/", 1)[-1].replace("%40", "@")
+from ..discovery.purl import short as _short
 
 
 def write(state):
