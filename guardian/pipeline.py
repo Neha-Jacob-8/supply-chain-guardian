@@ -19,7 +19,7 @@ def discover(repo, out, offline=False, history=20, no_vulns=False):
     if not comps:
         return inv, comps, [], []
     findings = [] if no_vulns else scan_components(comps, out / "cache" / "osv", offline=offline)
-    indicators, changes = run_detectors(repo, inv["lockfile"], comps, history)
+    indicators, changes = run_detectors(repo, inv, comps, history)
     findings += indicators
     findings.sort(key=lambda f: (-SEV_RANK.get(f["severity"], 0), -(f.get("cvss") or 0)))
     write_outputs(out, inv, comps, findings, changes)
@@ -30,10 +30,15 @@ def write_outputs(out, inv, comps, findings, changes):
     (out / "lockfile_changes.json").write_text(json.dumps(changes, indent=2))
     (out / "findings.json").write_text(json.dumps(findings, indent=2))
     (out / "sbom.cdx.json").write_text(json.dumps(inv["sbom"], indent=2))
-    nodes = [{"id": inv["root"], "type": "root"}] + [
-        {"id": c.component_id, "name": c.name, "version": c.version, "relationship": c.relationship,
-         "scope": c.scope, "risk_status": c.risk_status, "severity": c.severity, "cvss": c.cvss} for c in comps.values()]
+    roots = [{"id": inv["root"], "type": "root", "name": inv["sbom"]["metadata"]["component"]["name"]}]
+    roots += [{"id": p["root"], "type": "project", "name": p["name"], "ecosystem": p["ecosystem"], "manifest": p["manifest"]}
+              for p in inv["projects"] if p["root"] != inv["root"]]
+    nodes = roots + [
+        {"id": c.component_id, "name": c.name, "version": c.version, "ecosystem": c.ecosystem,
+         "relationship": c.relationship, "scope": c.scope, "risk_status": c.risk_status, "severity": c.severity,
+         "cvss": c.cvss, "resolution": c.resolution} for c in comps.values()]
     edges = [{"source": s, "target": t} for s, ts in inv["adjacency"].items() for t in ts]
     (out / "graph.json").write_text(json.dumps({"nodes": nodes, "edges": edges}, indent=2))
     (out / "components.json").write_text(json.dumps([asdict(c) for c in comps.values()], indent=2))
     write_matrix(matrix_rows(comps), out)
+    (out / "inventory.json").write_text(json.dumps({k: inv[k] for k in ("repo", "root", "projects", "ecosystems")}, indent=2))

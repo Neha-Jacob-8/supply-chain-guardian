@@ -154,9 +154,9 @@ def lockfile_consistency(repo, lock_rel, comps):
     return out
 
 
-def package_json_specs(repo, comps):
+def package_json_specs(repo, comps, pj_rel="package.json"):
     out = []
-    pj = repo / "package.json"
+    pj = repo / pj_rel
     if not pj.exists():
         return out
     text, data = pj.read_text(), json.loads(pj.read_text())
@@ -176,7 +176,7 @@ def package_json_specs(repo, comps):
                         if c.name == name and c.relationship == "direct"), None)
             out.append(_finding(
                 "SC4", "suspicious", "MEDIUM", f"{name} has a floating dependency spec", why,
-                {"source": "file", "path": "package.json", "line": ln, "sha256": _sha(text),
+                {"source": "file", "path": pj_rel, "line": ln, "sha256": _sha(text),
                  "excerpt": lines[ln - 1].strip() if ln else f'"{name}": "{spec}"'},
                 cid, "Pin an exact published version (and commit the lockfile)."))
     return out
@@ -393,12 +393,50 @@ def workflows(repo, today=None):
 STATUS_RANK = {"clean": 0, "maintenance": 1, "suspicious": 2, "vulnerable": 3}
 
 
-def run_detectors(repo_path, lock_rel, comps, history=20):
+def other_ecosystem_specs(repo, comps):
+    """Floating or unpinned sources outside npm: requirements ranges / VCS URLs, git deps on branches."""
+    out = []
+    for c in comps.values():
+        if c.relationship != "direct":
+            continue
+        src = c.source_url or ""
+        if c.ecosystem == "pypi" and c.resolution == "declared-only":
+            vcs = src.startswith(("git+", "http")) and not re.search(r"@[0-9a-f]{40}", src)
+            why = (f"installed from {src[:120]}, not an immutable release or commit" if vcs else
+                   "not pinned to an exact version: every install can resolve a different release")
+            out.append(_finding("SC4", "suspicious", "MEDIUM", f"{c.name}: floating Python requirement", why,
+                                {"source": "file", "path": (c.found_in or [""])[0], "line": None, "sha256": "",
+                                 "excerpt": f"{c.name} {src if vcs else ''}".strip()},
+                                c.component_id, "Pin with == (pip-compile / uv lock) and use hashes."))
+        if c.ecosystem == "git" and not re.fullmatch(r"[0-9a-f]{40}", c.version or ""):
+            out.append(_finding("SC2", "suspicious", "HIGH" if c.version in ("main", "master", "") else "MEDIUM",
+                                f"{c.name} is a git dependency on a moving ref",
+                                f"version '{c.version or 'unspecified'}' is a branch/tag, so its contents can change "
+                                "without any change in this repository (a moving branch)",
+                                {"source": "file", "path": (c.found_in or [""])[0], "line": None, "sha256": "",
+                                 "excerpt": f"{c.source_url} @ {c.version or '?'}"},
+                                c.component_id, "Pin to a full commit SHA."))
+    return out
+
+
+def run_detectors(repo_path, inv, comps, history=20):
+    """inv: the inventory dict (or, for backwards compatibility, an npm lockfile path)."""
     repo = Path(repo_path)
-    findings = lockfile_current(repo, lock_rel, comps) + lockfile_consistency(repo, lock_rel, comps) \
-        + package_json_specs(repo, comps)
-    hist, changes = lockfile_history(repo, lock_rel, history) if history else ([], [])
-    findings += hist + dockerfiles(repo) + workflows(repo)
+    if isinstance(inv, dict):
+        locks, projects = inv.get("npm_lockfiles", []), inv.get("projects", [])
+    else:
+        locks, projects = ([inv] if inv else []), []
+    findings, changes = [], []
+    for lock_rel in locks:
+        findings += lockfile_current(repo, lock_rel, comps) + lockfile_consistency(repo, lock_rel, comps)
+        if history:
+            h, ch = lockfile_history(repo, lock_rel, history)
+            findings += h
+            changes += [dict(x, lockfile=lock_rel) for x in ch]
+    pj_dirs = {str(Path(p["manifest"]).parent) for p in projects if p["ecosystem"] == "npm"} or ({"."} if locks else set())
+    for d in sorted(pj_dirs):
+        findings += package_json_specs(repo, comps, str(Path(d) / "package.json"))
+    findings += other_ecosystem_specs(repo, comps) + dockerfiles(repo) + workflows(repo)
     # component status: never downgrade a "vulnerable" component
     for f in findings:
         c = comps.get(f["component_id"]) if f["component_id"] else None

@@ -6,8 +6,7 @@ COLUMNS = ["component_id", "name", "version", "ecosystem", "relationship", "scop
            "advisory_ids", "cvss", "severity", "affected_range", "fixed_version", "risk_status"]
 
 
-def _short(cid):
-    return cid.split("pkg:npm/", 1)[-1].replace("%40", "@")
+from .purl import short as _short
 
 
 def matrix_rows(comps):

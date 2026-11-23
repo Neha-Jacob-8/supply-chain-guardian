@@ -68,10 +68,10 @@ def main():
     out = Path(a.out)
     inv, comps, findings, changes = discover(a.repo, out, a.offline, a.history, a.no_vulns)
     if not comps:
-        print("No supported lockfile; see coverage_gaps.json"); return
+        print("No supported manifest or lockfile; see coverage_gaps.json"); return
     edges = [t for ts in inv["adjacency"].values() for t in ts]
     rel, scope = Counter(c.relationship for c in comps.values()), Counter(c.scope for c in comps.values())
-    print(f"Repo: {inv['repo']}  lockfile: {inv['lockfile']}")
+    print(f"Repo: {inv['repo']}  projects: " + ", ".join(f"{p['manifest']} ({p['ecosystem']}, {p['components']})" for p in inv["projects"]))
     print(f"Components (unique name@version): {len(comps)}")
     print(f"  direct: {rel['direct']}  transitive: {rel['transitive']}")
     print(f"  prod: {scope['prod']}  dev: {scope['dev']}")
