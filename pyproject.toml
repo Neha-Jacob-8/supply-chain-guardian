@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supply-chain-guardian"
+version = "0.2.0"
+description = "Agentic AI guardian that discovers, investigates, prioritises, remediates and independently validates software supply-chain risks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary (hackathon prototype)" }
+dependencies = []   # discovery, detection, risk, remediation, validation and reporting use the standard library only
+
+[project.optional-dependencies]
+llm = ["anthropic>=2.12"]      # Claude-backed agents; without it agents run their labelled rule-based fallbacks
+api = ["fastapi>=0.115", "uvicorn>=0.30"]   # `guardian serve` for the dashboard
+all = ["supply-chain-guardian[llm,api]"]
+
+[project.scripts]
+guardian = "guardian.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["guardian*"]
+
+[tool.setuptools.package-data]
+"guardian.agents.prompts" = ["*.md"]
+"guardian.policies" = ["*.json"]
