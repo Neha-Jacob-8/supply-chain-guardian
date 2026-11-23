@@ -162,3 +162,20 @@ def parse_requirements(repo, rel):
     if unpinned:
         pg.gap("unresolved_dependency", f"{unpinned} requirement(s) are not pinned to an exact version", rel)
     return assemble(pg)
+
+
+def parse_pyproject(repo, rel):
+    """pyproject.toml without a lockfile: declared dependencies only (PEP 621, Poetry, dependency groups)."""
+    path = repo / rel
+    try:
+        d = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    pg = ProjectGraph(rel, "pypi", d.get("project", {}).get("name") or d.get("tool", {}).get("poetry", {}).get("name")
+                      or path.parent.name, d.get("project", {}).get("version", ""))
+    for name, scope in _pyproject_direct(path).items():
+        pg.direct[pg.add(name, "", resolution="declared-only")] = scope
+    if pg.packages:
+        pg.gap("no_lockfile", f"{len(pg.packages)} dependencies declared in pyproject.toml without a lockfile: versions "
+                              "are ranges and transitive dependencies are unknown")
+    return assemble(pg)

@@ -9,7 +9,7 @@ description = "Agentic AI guardian that discovers, investigates, prioritises, re
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary (hackathon prototype)" }
-dependencies = []   # discovery, detection, risk, remediation, validation and reporting use the standard library only
+dependencies = ["pyyaml>=6"]   # only for pnpm-lock.yaml; everything else uses the standard library
 
 [project.optional-dependencies]
 llm = ["anthropic>=2.12"]      # Claude-backed agents; without it agents run their labelled rule-based fallbacks

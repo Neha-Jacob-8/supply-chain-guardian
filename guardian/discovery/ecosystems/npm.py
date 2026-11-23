@@ -1,6 +1,7 @@
 """npm: package-lock.json (v2/v3, full graph), yarn.lock v1 (full graph), package.json alone (declared only)."""
 import json
 import re
+from pathlib import Path
 
 from ..graph import build_components
 from ..lockfile import build_instance_edges, load_lockfile
@@ -101,3 +102,85 @@ def parse_package_json(repo, rel):
         pg.gap("no_lockfile", f"{len(pg.packages)} declared npm dependencies without a lockfile: versions are "
                               "ranges and transitive dependencies are unknown")
     return assemble(pg)
+
+
+def _pnpm_key(key):
+    """'/@s/x@1.0.0(peer@2)' or '@s/x@1.0.0(peer@2)' -> ('@s/x', '1.0.0')."""
+    base = key.lstrip("/").split("(")[0]
+    name, _, ver = base.rpartition("@")
+    return name, ver
+
+
+def _pnpm_ver(name, ver):
+    """Importer/dependency version -> (name, version) or None for workspace links; handles npm: aliases."""
+    ver = str(ver).split("(")[0]
+    if ver.startswith(("link:", "file:", "workspace:")):
+        return None
+    if ver.startswith("npm:"):
+        return _pnpm_key(ver[4:])
+    if ver.startswith("/"):
+        return _pnpm_key(ver)
+    return name, ver
+
+
+def parse_pnpm_lock(repo, rel):
+    """pnpm-lock.yaml v6-v9: one project per workspace importer, each with only the packages it reaches."""
+    try:
+        import yaml
+    except ImportError:
+        pg = ProjectGraph(rel, "npm", (repo / rel).parent.name)
+        pg.gap("unsupported_format", "pnpm-lock.yaml needs PyYAML (pip install pyyaml)")
+        return [assemble(pg)]
+    docs = [d for d in yaml.safe_load_all((repo / rel).read_text()) if isinstance(d, dict)]
+    doc = max(docs, key=lambda d: len(d.get("packages") or {}) + len(d.get("importers") or {}), default={})
+    packages, snapshots = doc.get("packages") or {}, doc.get("snapshots") or {}
+    meta, edges = {}, {}
+    for key, p in packages.items():
+        name, ver = _pnpm_key(key)
+        meta[(name, ver)] = {"integrity": ((p or {}).get("resolution") or {}).get("integrity"),
+                             "has_install_script": bool((p or {}).get("requiresBuild"))}
+    for key, p in (snapshots or packages).items():          # v9 edges live in snapshots, v6 in packages
+        parent = _pnpm_key(key)
+        for section in ("dependencies", "optionalDependencies"):
+            for dn, dv in ((p or {}).get(section) or {}).items():
+                child = _pnpm_ver(dn, dv)
+                if child:
+                    edges.setdefault(parent, set()).add(child)
+    importers = doc.get("importers") or {".": {k: doc.get(k) for k in ("dependencies", "devDependencies", "optionalDependencies")}}
+    base_dir = Path(rel).parent
+    results = []
+    for imp, spec in importers.items():
+        man = str((base_dir / imp / "package.json")).replace("\\", "/")
+        man = man[2:] if man.startswith("./") else man
+        pj = repo / man
+        try:
+            name = json.loads(pj.read_text()).get("name") if pj.exists() else None
+        except (OSError, json.JSONDecodeError):
+            name = None
+        pg = ProjectGraph(man, "npm", name or (imp if imp != "." else (repo / rel).parent.name))
+        direct = {}
+        for section, scope in (("dependencies", "prod"), ("optionalDependencies", "prod"), ("devDependencies", "dev")):
+            for dn, dv in ((spec or {}).get(section) or {}).items():
+                nv = _pnpm_ver(dn, dv["version"] if isinstance(dv, dict) else dv)
+                if nv:
+                    direct.setdefault(nv, scope)
+        seen, stack = set(), list(direct)
+        while stack:                                       # only packages this importer reaches
+            nv = stack.pop()
+            if nv in seen:
+                continue
+            seen.add(nv)
+            stack.extend(edges.get(nv, ()))
+        ids = {nv: pg.add(nv[0], nv[1], **(meta.get(nv) or {})) for nv in seen}
+        for nv in seen:
+            for ch in edges.get(nv, ()):
+                if ch in ids:
+                    pg.edges.append((ids[nv], ids[ch]))
+        for nv, scope in direct.items():
+            pg.direct[ids[nv]] = scope
+        r = assemble(pg)
+        for c in r["components"].values():
+            c.found_in = [rel]
+        if r["components"]:
+            results.append(r)
+    return results
