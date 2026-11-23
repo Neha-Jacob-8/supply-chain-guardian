@@ -16,9 +16,18 @@ def discover(repo, out, offline=False, history=20, no_vulns=False):
     inv = build_inventory(repo)
     comps = inv["components"]
     (out / "coverage_gaps.json").write_text(json.dumps(inv["gaps"], indent=2))
-    if not comps:
+    if not comps:                       # write empty outputs so nothing from a previous run survives
+        write_outputs(out, inv, comps, [], [])
         return inv, comps, [], []
-    findings = [] if no_vulns else scan_components(comps, out / "cache" / "osv", offline=offline)
+    findings = []
+    if not no_vulns:
+        try:
+            findings = scan_components(comps, out / "cache" / "osv", offline=offline)
+        except Exception as e:       # no network / no cache: report it, keep the rest of the analysis
+            inv["gaps"].append({"path": ".", "kind": "scan_error",
+                                "detail": f"vulnerability lookup unavailable ({type(e).__name__}: {str(e)[:160]}); "
+                                          "re-run online to check advisories"})
+            (out / "coverage_gaps.json").write_text(json.dumps(inv["gaps"], indent=2))
     indicators, changes = run_detectors(repo, inv, comps, history)
     findings += indicators
     findings.sort(key=lambda f: (-SEV_RANK.get(f["severity"], 0), -(f.get("cvss") or 0)))
