@@ -1,7 +1,7 @@
 """Part 1+2: read package-lock.json (v2/v3) and build instance-level edges."""
 import json
 from pathlib import Path
-from .models import CoverageGap
+from ..models import CoverageGap
 
 NM = "node_modules/"
 
