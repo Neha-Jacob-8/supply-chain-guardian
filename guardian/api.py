@@ -16,8 +16,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+WEB = Path(__file__).parent / "web"
 
 
 class RunRequest(BaseModel):
@@ -67,7 +70,7 @@ def create_app(out_dir="output"):
                     job["error"] = None
                 except Exception as e:  # surfaced via /api/status
                     job["error"] = f"{type(e).__name__}: {e}"
-            job.update(kind=kind, started=time.time(), error=None, thread=threading.Thread(target=wrapped, daemon=True))
+            job.update(kind=kind, started=time.time(), error=None, phase=None, thread=threading.Thread(target=wrapped, daemon=True))
             job["thread"].start()
         return {"started": kind}
 
@@ -81,20 +84,30 @@ def create_app(out_dir="output"):
     def status():
         st = load("run_state.json", {})
         approvals = st.get("approvals", {})
-        return {"running": running(), "job": job["kind"], "error": job["error"], "stage": st.get("stage"),
-                "repo": st.get("repo"), "llm_mode": st.get("llm_mode"),
+        return {"running": running(), "job": job["kind"], "phase": job.get("phase"), "error": job["error"],
+                "stage": st.get("stage"), "repo": st.get("repo"), "target": job.get("repo"), "llm_mode": st.get("llm_mode"),
                 "approvals": Counter(v["status"] for v in approvals.values())}
 
     @app.post("/api/runs")
     def start_run(req: RunRequest):
         from .agents.orchestrator import Orchestrator
-        from .ingestion import resolve_target
-        try:
-            repo = str(resolve_target(req.target))
-        except (ValueError, RuntimeError) as e:
-            raise HTTPException(400, str(e))
-        o = Orchestrator(repo, out, req.llm, req.offline, smoke=req.smoke)
-        return start("run", lambda: o.run(approve=None, interactive=False)) | {"repo": repo}
+        from .ingestion import parse_github_url, resolve_target
+        target = req.target.strip()
+        if target.startswith(("http://", "https://", "git@", "ssh://", "file://")):
+            try:
+                parse_github_url(target)           # validate now; clone in the background job
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        elif not Path(target).is_dir():
+            raise HTTPException(400, f"{target} is neither a directory nor a GitHub URL")
+
+        def job_fn():
+            job["phase"] = "cloning"
+            repo = str(resolve_target(target))
+            job["repo"], job["phase"] = repo, "running"
+            Orchestrator(repo, out, req.llm, req.offline, smoke=req.smoke).run(approve=None, interactive=False)
+        job["repo"] = target
+        return start("run", job_fn) | {"target": target}
 
     @app.post("/api/resume")
     def resume(req: ResumeRequest):
@@ -148,6 +161,10 @@ def create_app(out_dir="output"):
         rows = [r for r in rows if (not risk_status or r["risk_status"] == risk_status) and
                 (not scope or r["scope"] == scope) and (not q or q.lower() in r["name"].lower())]
         return {"total": len(rows), "rows": rows[:limit]}
+
+    @app.get("/api/inventory")
+    def inventory():
+        return load("inventory.json", {})
 
     @app.get("/api/graph")
     def graph():
@@ -228,6 +245,12 @@ def create_app(out_dir="output"):
     def report_json():
         return load("report.json")
 
+    if WEB.is_dir():
+        app.mount("/ui", StaticFiles(directory=WEB, html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        def root():
+            return RedirectResponse("/ui/")
     return app
 
 

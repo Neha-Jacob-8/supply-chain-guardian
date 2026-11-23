@@ -7,7 +7,7 @@ name = "supply-chain-guardian"
 version = "0.2.0"
 description = "Agentic AI guardian that discovers, investigates, prioritises, remediates and independently validates software supply-chain risks"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "Proprietary (hackathon prototype)" }
 dependencies = []   # discovery, detection, risk, remediation, validation and reporting use the standard library only
 
@@ -25,3 +25,4 @@ include = ["guardian*"]
 [tool.setuptools.package-data]
 "guardian.agents.prompts" = ["*.md"]
 "guardian.policies" = ["*.json"]
+"guardian.web" = ["*.html", "*.css", "*.js"]

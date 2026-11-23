@@ -167,6 +167,9 @@ class Orchestrator:
     # ---------- entry points ----------
 
     def run(self, approve=None, interactive=False):
+        for stale in ("events.jsonl", "report.md", "report.json"):   # a new run starts a new audit trail
+            (self.state.out / stale).unlink(missing_ok=True)
+        self.state.log("orchestrator", "run_started", {"repo": str(self.state.repo), "llm": self.state.llm_mode})
         if not self.discover():
             return self.finish()
         self.investigate()
