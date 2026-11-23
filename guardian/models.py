@@ -16,7 +16,8 @@ class Component:
     license: str | None = None
     has_install_script: bool = False
     resolution: str = "locked"         # locked | unresolved
-    found_in: list = field(default_factory=list)  # lockfile keys where installed
+    found_in: list = field(default_factory=list)  # lockfile keys / manifests where it appears
+    projects: list = field(default_factory=list)  # manifests (projects) that depend on it
     # filled in later by the vulnerability stage
     advisory_ids: list = field(default_factory=list)
     cvss: float | None = None
