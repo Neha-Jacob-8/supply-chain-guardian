@@ -41,7 +41,7 @@ def write(state):
         top = max(p["finding_ids"], key=lambda i: s.risk[i]["score"]) if p["finding_ids"] else None
         sc = s.risk[top]["score"] if top else "-"
         L.append(f"| {p['rank']} | {p['headline']} | {sc} | {p['recommendation']}{' (escalate)' if p.get('escalate') else ''} "
-                 f"| {p['rationale'][:220].replace('|', '/')} |")
+                 f"| {p.get('rationale', '')[:220].replace('|', '/')} |")
     L += ["", "## Red Team investigations", ""]
     for i in s.investigations:
         L += [f"### {i['title']} — {i['verdict']} (confidence {i['confidence']})", "", f"*Hypothesis:* {i['hypothesis']}", ""]
