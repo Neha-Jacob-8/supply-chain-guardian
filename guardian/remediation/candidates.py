@@ -93,10 +93,12 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
             old_spec = pj[section][c.name]
             new_text = re.sub(r'("' + re.escape(c.name) + r'"\s*:\s*)"' + re.escape(old_spec) + '"',
                               lambda m: f'{m.group(1)}"{target}"', text, count=1)
+            pnpm = any(f.endswith("pnpm-lock.yaml") for f in c.found_in)
             out.append(_candidate(
                 "VULN", cid, "upgrade", f"Upgrade {c.name} {c.version} -> {target} ({rel}, {section})",
-                {rel: (text, new_text)}, closes, "high" if major else "medium", compat,
-                f'Revert {rel} "{c.name}": "{old_spec}" and restore the previous lockfile.', cid, needs_lockfile_regen=True))
+                {rel: (text, new_text)}, closes, "high" if major else "medium",
+                compat + (" Regenerate pnpm-lock.yaml with `pnpm install` (not done automatically)." if pnpm else ""),
+                f'Revert {rel} "{c.name}": "{old_spec}" and restore the previous lockfile.', cid, needs_lockfile_regen=not pnpm))
         elif c.ecosystem == "pypi" and any(m.endswith(".txt") for m in c.found_in):
             rel = next(m for m in c.found_in if m.endswith(".txt"))
             text = (repo / rel).read_text()
