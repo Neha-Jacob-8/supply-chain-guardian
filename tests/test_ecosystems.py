@@ -83,6 +83,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         self.assertEqual(c["pkg:ros/rclcpp"].resolution, "declared-only")
         self.assertIn("pkg:git/o%2Fx@main", c)
 
+    def test_pnpm_workspace_importers_and_edges(self):
+        lock = """lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      vite: {specifier: ^5.0.0, version: 5.0.0}
+  packages/app:
+    dependencies:
+      lodash: {specifier: ^4.17.0, version: 4.17.21}
+      shared: {specifier: workspace:*, version: link:../shared}
+packages:
+  vite@5.0.0: {resolution: {integrity: sha512-AAA}}
+  esbuild@0.19.0: {resolution: {integrity: sha512-BBB}}
+  lodash@4.17.21: {resolution: {integrity: sha512-CCC}}
+snapshots:
+  vite@5.0.0:
+    dependencies:
+      esbuild: 0.19.0
+  esbuild@0.19.0: {}
+  lodash@4.17.21: {}
+"""
+        inv = build_inventory(repo_with({"pnpm-lock.yaml": lock, "package.json": '{"name": "root"}',
+                                         "packages/app/package.json": '{"name": "app"}'}))
+        self.assertEqual(sorted(p["manifest"] for p in inv["projects"]), ["package.json", "packages/app/package.json"])
+        c = inv["components"]
+        self.assertEqual(c["pkg:npm/esbuild@0.19.0"].relationship, "transitive")
+        self.assertEqual(c["pkg:npm/esbuild@0.19.0"].scope, "dev")
+        self.assertEqual(c["pkg:npm/lodash@4.17.21"].scope, "prod")
+        self.assertNotIn("pkg:npm/shared", " ".join(c))       # workspace links are not packages
+
 
 if __name__ == "__main__":
     unittest.main()
