@@ -38,6 +38,17 @@ come from `guardian/risk.py`, never from the LLM; the Defense agent can only pic
 `guardian/remediation.py`; only the Validation step produces verdicts. LLM: `claude-opus-5-5` (override with
 `GUARDIAN_MODEL`).
 
+## Dashboard
+
+Static dashboard in `frontend/` (overview, Dependency Matrix, graph, findings with evidence, lockfile history,
+coverage gaps). It reads the files in `output/`:
+
+```bash
+guardian scan targets/NodeGoat          # or `guardian run ...`
+python3 -m http.server 8000             # from the repo root
+# open http://localhost:8000/frontend/
+```
+
 ## Dashboard API
 
 ```bash
