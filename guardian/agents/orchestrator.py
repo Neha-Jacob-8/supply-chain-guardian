@@ -90,6 +90,14 @@ class Orchestrator:
                                      summary=by_id[p["candidate_id"]]["summary"], diff=by_id[p["candidate_id"]]["diff"])
                                 for p in res["proposals"] if p["candidate_id"] in by_id]
         self.state.escalations = res.get("escalations", [])
+        # candidates without a patch (manual upgrades, no fix published) go to a human, not to approval/validation
+        manual = [p for p in self.state.proposals if by_id[p["candidate_id"]]["action"] == "escalate" or not by_id[p["candidate_id"]]["files"]]
+        for p in manual:
+            c = by_id[p["candidate_id"]]
+            self.state.escalations.append({"finding_ids": p["finding_ids"], "reason": f"{c['summary']}. {c['compat_notes']}"})
+        if manual:
+            self.decide("route manual fixes to escalation", f"{len(manual)} proposal(s) have no patch to validate")
+        self.state.proposals = [p for p in self.state.proposals if p not in manual]
         for p in self.state.proposals:
             self.state.approvals.setdefault(p["candidate_id"], {"status": "pending"})
         print(f"  {len(self.state.proposals)} proposals, {len(self.state.escalations)} escalations ({res['mode']})")
