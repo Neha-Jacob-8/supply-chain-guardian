@@ -130,19 +130,16 @@ function showEvidence() {
   <dt>Saved file</dt><dd><code>${esc(e.path)}</code></dd><dt>SHA-256</dt><dd><code>${esc(e.sha256)}</code></dd></dl>`;
 }
 
-// lockfile_changes.json was not in the scan output when this was built, so the schema is a guess:
-// accepts an array of changes, or an object like {added:[], removed:[], changed:[]}.
+// lockfile_changes.json: one entry per commit that touched the lockfile (newest first):
+// {commit, date, author, subject, added, removed, version_changed, hash_algorithm_upgrades} or {commit, date, subject, note}
 function timeline() {
   const el = $('#timeline');
   if (!changes) { el.innerHTML = '<p class="muted">No lockfile_changes.json found in output/ yet.</p>'; return; }
-  let items = [];
-  if (Array.isArray(changes)) items = changes;
-  else Object.entries(changes).forEach(([k, v]) => Array.isArray(v) && v.forEach(i => items.push(typeof i === 'object' ? { kind: k, ...i } : { kind: k, name: i })));
-  if (!items.length) { el.innerHTML = '<p class="muted">No changes recorded.</p>'; return; }
-  el.innerHTML = '<div class="tl">' + items.map(i => {
-    const nm = i.name || i.package || i.component_id || '', from = i.from || i.old_version || i.before, to = i.to || i.new_version || i.after || i.version;
-    const kind = i.kind || i.type || i.change || 'change';
-    return `<div><span class="badge">${esc(kind)}</span> <b>${esc(label(nm))}</b> ${from || to ? `<span class="muted">${esc(from || '')} → ${esc(to || '')}</span>` : ''} ${i.date || i.commit ? `<span class="muted">${esc(i.date || i.commit)}</span>` : ''}${nm ? '' : `<code>${esc(JSON.stringify(i))}</code>`}</div>`;
+  if (!changes.length) { el.innerHTML = '<p class="muted">No lockfile commits in the analysed history.</p>'; return; }
+  el.innerHTML = '<div class="tl">' + changes.map(c => {
+    const counts = c.note ? `<span class="muted">${esc(c.note)}</span>`
+      : `<span class="muted">+${c.added} / -${c.removed} / ~${c.version_changed} versions${c.hash_algorithm_upgrades ? `, ${c.hash_algorithm_upgrades} hash-algorithm upgrades (benign)` : ''}</span>`;
+    return `<div><span class="badge">${esc(c.date || '')}</span> <code>${esc(c.commit)}</code> <b>${esc(c.subject || '')}</b> ${c.author ? `<span class="muted">${esc(c.author)}</span>` : ''} ${counts}</div>`;
   }).join('') + '</div>';
 }
 
