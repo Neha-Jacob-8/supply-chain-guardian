@@ -51,70 +51,102 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
     for f in findings:
         if f.get("component_id"):
             by_comp.setdefault(f["component_id"], []).append(f)
-    pj_path = repo / "package.json"
-    pj_text = pj_path.read_text() if pj_path.exists() else None
-    pj = json.loads(pj_text) if pj_text else {}
 
-    # 1) vulnerable direct dependency -> bump spec in package.json
+    def project_pj(c):
+        """package.json of the npm project the component belongs to: (relative path, text, parsed)."""
+        man = next((m for m in c.projects if m.endswith((".json", ".lock"))), None)
+        rel = str(Path(man).parent / "package.json") if man else "package.json"
+        rel = rel[2:] if rel.startswith("./") else rel
+        f = repo / rel
+        if not f.exists():
+            return None, None, None
+        t = f.read_text()
+        return rel, t, json.loads(t)
+
+    # 1) vulnerable direct dependency -> bump the version where it is declared
     for cid, fs in by_comp.items():
         c = comps.get(cid)
         vf = [f for f in fs if f["category"] == "vulnerability"]
-        if not c or not vf or c.relationship != "direct" or not pj_text:
+        if not c or not vf or c.relationship != "direct":
             continue
         target = _clean_fix(c.fixed_version)
-        section = next((s for s in ("dependencies", "devDependencies") if c.name in pj.get(s, {})), None)
-        if not target or not section:
+        if not target:
             out.append(_candidate("VULN", cid, "escalate", f"No published fix for all advisories of {c.name}@{c.version}",
-                                  {}, [], "high", "Needs replacement or mitigation decision by a human",
-                                  "n/a", cid))
+                                  {}, [], "high", "Needs replacement or mitigation decision by a human", "n/a", cid))
             continue
-        meta = registry_metadata(c.name, target, cache_dir / "registry", offline)
-        if meta is not None and meta.get("error"):
-            out.append(_candidate("VULN", cid, "escalate", f"Fixed version {c.name}@{target} is not on the npm registry",
-                                  {}, [], "high", meta["error"], "n/a", cid))
-            continue
-        old_spec = pj[section][c.name]
-        new_text = re.sub(r'("' + re.escape(c.name) + r'"\s*:\s*)"' + re.escape(old_spec) + '"',
-                          lambda m: f'{m.group(1)}"{target}"', pj_text, count=1)
-        major = _major(target) != _major(c.version)
         closes = [f["finding_id"] for f in vf if f.get("fixed_version") and
                   not _semver_key(target) < _semver_key(f["fixed_version"])]
-        out.append(_candidate(
-            "VULN", cid, "upgrade", f"Upgrade {c.name} {c.version} -> {target} ({section})",
-            {"package.json": (pj_text, new_text)}, closes, "high" if major else "medium",
-            (f"Major version jump {_major(c.version)} -> {_major(target)}: API changes likely; app code using "
-             f"{c.name} must be re-tested." if major else "Same major version: low API risk."),
-            f'Revert package.json "{c.name}": "{old_spec}" and restore the previous package-lock.json.',
-            cid, needs_lockfile_regen=True))
+        major = _major(target) != _major(c.version)
+        compat = (f"Major version jump {_major(c.version)} -> {_major(target)}: API changes likely; code using "
+                  f"{c.name} must be re-tested." if major else "Same major version: low API risk.")
+        if c.ecosystem == "npm":
+            rel, text, pj = project_pj(c)
+            section = next((s for s in ("dependencies", "devDependencies", "optionalDependencies")
+                            if pj and c.name in pj.get(s, {})), None)
+            if not section:
+                continue
+            meta = registry_metadata(c.name, target, cache_dir / "registry", offline)
+            if meta is not None and meta.get("error"):
+                out.append(_candidate("VULN", cid, "escalate", f"Fixed version {c.name}@{target} is not on the npm registry",
+                                      {}, [], "high", meta["error"], "n/a", cid))
+                continue
+            old_spec = pj[section][c.name]
+            new_text = re.sub(r'("' + re.escape(c.name) + r'"\s*:\s*)"' + re.escape(old_spec) + '"',
+                              lambda m: f'{m.group(1)}"{target}"', text, count=1)
+            out.append(_candidate(
+                "VULN", cid, "upgrade", f"Upgrade {c.name} {c.version} -> {target} ({rel}, {section})",
+                {rel: (text, new_text)}, closes, "high" if major else "medium", compat,
+                f'Revert {rel} "{c.name}": "{old_spec}" and restore the previous lockfile.', cid, needs_lockfile_regen=True))
+        elif c.ecosystem == "pypi" and any(m.endswith(".txt") for m in c.found_in):
+            rel = next(m for m in c.found_in if m.endswith(".txt"))
+            text = (repo / rel).read_text()
+            names = "|".join({re.escape(c.name), re.escape(c.name.replace("-", "_")), re.escape(c.name.replace("-", "."))})
+            new_text = re.sub(r"(?im)^((?:" + names + r")(\[[^\]]*\])?\s*===?\s*)" + re.escape(c.version) + r"\b",
+                              lambda m: m.group(1) + target, text, count=1)
+            if new_text != text:
+                out.append(_candidate(
+                    "VULN", cid, "upgrade", f"Upgrade {c.name} {c.version} -> {target} ({rel})", {rel: (text, new_text)},
+                    closes, "high" if major else "medium", compat + " Dependencies of the new version are not re-resolved; "
+                    "regenerate the pinned file with pip-compile/uv if it is generated.",
+                    f"Revert {rel} to {c.name}=={c.version}", cid))
+        else:
+            manifest = (c.projects or c.found_in or ["its manifest"])[0]
+            out.append(_candidate(
+                "VULN", cid, "escalate", f"Upgrade {c.name} {c.version} -> {target} in {manifest} (manual)",
+                {}, [], "high" if major else "medium",
+                f"Automatic patching is not implemented for {c.ecosystem}; update {manifest} and regenerate its lockfile. " + compat,
+                "Revert the manifest/lockfile change", cid))
 
-    # 2) vulnerable transitive deps -> one npm "overrides" entry per package name
+    # 2) vulnerable transitive npm deps -> one "overrides" entry per package name and project
     trans = {}
     for cid, fs in by_comp.items():
         c = comps.get(cid)
         vf = [f for f in fs if f["category"] == "vulnerability"]
-        if c and vf and c.relationship == "transitive" and c.scope == "prod":
-            trans.setdefault(c.name, []).append((c, vf))
-    for name, items in sorted(trans.items()):
+        if c and vf and c.ecosystem == "npm" and c.relationship == "transitive" and c.scope == "prod":
+            rel = project_pj(c)[0]
+            if rel:
+                trans.setdefault((rel, c.name), []).append((c, vf))
+    for (rel, name), items in sorted(trans.items()):
         fixes = [_clean_fix(c.fixed_version) for c, _ in items]
-        if not pj_text or not all(fixes):
+        if not all(fixes):
             continue
         target = max(fixes, key=_semver_key)
         meta = registry_metadata(name, target, cache_dir / "registry", offline)
         if meta is not None and meta.get("error"):
             continue
+        _, text, pj = project_pj(items[0][0])
         overrides = dict(pj.get("overrides", {})); overrides[name] = target
-        new_pj = dict(pj); new_pj["overrides"] = overrides
-        new_text = json.dumps(new_pj, indent=2) + "\n"
+        new_text = json.dumps(dict(pj, overrides=overrides), indent=2) + "\n"
         majors = sorted({_major(c.version) for c, _ in items} - {_major(target)})
         out.append(_candidate(
-            "OVR", name, "override",
+            "OVR", f"{rel}:{name}", "override",
             f"Force transitive {name} ({', '.join(sorted(c.version for c, _ in items))}) -> {target} via npm overrides",
-            {"package.json": (pj_text, new_text)}, [f["finding_id"] for _, vf in items for f in vf],
+            {rel: (text, new_text)}, [f["finding_id"] for _, vf in items for f in vf],
             "medium" if majors else "low",
-            "Requires npm >= 8.3 to honour `overrides` (the current node:12 image ships npm 6, which ignores it)."
+            "Requires npm >= 8.3 to honour `overrides` (older npm ignores it)."
             + (f" Parents expecting major {majors} get {_major(target)}.x." if majors else ""),
-            f'Remove the "{name}" entry from "overrides" and restore package-lock.json.',
-            requires=["node runtime with npm >= 8.3"], needs_lockfile_regen=True))
+            f'Remove the "{name}" entry from "overrides" in {rel} and restore the lockfile.',
+            requires=["npm >= 8.3"], needs_lockfile_regen=True))
 
     # 3) lockfile tampering -> restore registry values (verified against registry metadata), one candidate
     lock_path = repo / "package-lock.json"
