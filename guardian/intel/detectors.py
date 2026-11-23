@@ -404,7 +404,8 @@ def other_ecosystem_specs(repo, comps):
             vcs = src.startswith(("git+", "http")) and not re.search(r"@[0-9a-f]{40}", src)
             why = (f"installed from {src[:120]}, not an immutable release or commit" if vcs else
                    "not pinned to an exact version: every install can resolve a different release")
-            out.append(_finding("SC4", "suspicious", "MEDIUM", f"{c.name}: floating Python requirement", why,
+            out.append(_finding("SC4", "suspicious", "MEDIUM" if (vcs or c.scope == "prod") else "LOW",
+                                f"{c.name}: floating Python requirement", why,
                                 {"source": "file", "path": (c.found_in or [""])[0], "line": None, "sha256": "",
                                  "excerpt": f"{c.name} {src if vcs else ''}".strip()},
                                 c.component_id, "Pin with == (pip-compile / uv lock) and use hashes."))
