@@ -29,6 +29,27 @@ def _walk_ids(obj, out):
             _walk_ids(v, out)
 
 
+def check_schema(value, schema, path="result"):
+    """Minimal JSON-schema check (types, required, enums, nested objects/arrays). Returns a list of errors."""
+    errs, t = [], schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool}
+    if t in types and not isinstance(value, types[t]) or (t in ("integer", "number") and isinstance(value, bool)):
+        return [f"{path} must be {t}"]
+    if "enum" in schema and value not in schema["enum"]:
+        errs.append(f"{path} must be one of {schema['enum']}")
+    if t == "object":
+        for k in schema.get("required", []):
+            if k not in value:
+                errs.append(f"{path}.{k} is missing")
+        for k, sub in schema.get("properties", {}).items():
+            if k in value:
+                errs += check_schema(value[k], sub, f"{path}.{k}")
+    if t == "array" and "items" in schema:
+        for i, v in enumerate(value):
+            errs += check_schema(v, schema["items"], f"{path}[{i}]")
+    return errs
+
+
 def check_citations(state, result):
     ids = []
     _walk_ids(result, ids)
@@ -79,7 +100,9 @@ class Agent:
             results, final = [], None
             for u in r.tool_uses:
                 if u.name == SUBMIT:
-                    errors = check_citations(state, u.input)
+                    errors = check_schema(u.input, self.result_schema)[:8]
+                    errors = (["Result does not match the schema: " + "; ".join(errors)] if errors else []) \
+                        + check_citations(state, u.input)
                     state.log(self.name, "submit", {"accepted": not errors, "errors": errors})
                     if errors:
                         results.append({"type": "tool_result", "tool_use_id": u.id, "is_error": True,

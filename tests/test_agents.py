@@ -65,6 +65,18 @@ class Guardrails(unittest.TestCase):
         self.assertIn("tool_call", kinds)
         self.assertEqual([e["detail"]["accepted"] for e in s.events if e["kind"] == "submit"], [False, True])
 
+    def test_schema_violations_are_rejected_and_corrected(self):
+        s = make_state()
+        fid = s.findings[0]["finding_id"]
+        llm = ScriptedLLM([
+            {"tool_uses": [("submit_result", {"evidence_ids": [fid]})]},                      # missing "claim"
+            {"tool_uses": [("submit_result", {"claim": "lodash is used", "evidence_ids": [fid]})]},
+        ])
+        res = EchoAgent().run(s, llm)
+        self.assertEqual(res["claim"], "lodash is used")
+        rejected = [e for e in s.events if e["kind"] == "submit" and not e["detail"]["accepted"]]
+        self.assertIn("result.claim is missing", rejected[0]["detail"]["errors"][0])
+
     def test_tool_calls_become_citable_evidence(self):
         s = make_state()
         out, eid = T.call(s, "check_import_usage", {"package": "lodash"})
