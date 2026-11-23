@@ -11,6 +11,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from ..discovery.purl import OSV_ECOSYSTEM, normalize_name
+
 OSV = "https://api.osv.dev/v1"
 BATCH = 1000
 
@@ -63,6 +65,18 @@ def _fetch_vuln(vid, cache_dir, offline=False):
     return json.loads(raw), {"path": str(f), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
+def _has_severity(rec):
+    return any(x.get("type") == "CVSS_V3" for x in rec.get("severity", [])) or \
+        bool((rec.get("database_specific") or {}).get("severity"))
+
+
+def _safe_fetch(vid, cache_dir, offline):
+    try:
+        return _fetch_vuln(vid, cache_dir, offline)[0]
+    except Exception:
+        return None
+
+
 # ---------- CVSS v3.x base score (spec formula, no dependency) ----------
 
 _W = {
@@ -102,7 +116,7 @@ def _band(score):
 # ---------- semver compare (enough for npm ranges) ----------
 
 def _semver_key(v):
-    v = v.split("+")[0]
+    v = str(v).split("+")[0].lstrip("vV")
     core, _, pre = v.partition("-")
     nums = [int(x) if x.isdigit() else 0 for x in (core.split(".") + ["0", "0"])[:3]]
     # release sorts after any prerelease of the same core
@@ -114,12 +128,13 @@ def _lt(a, b):
     return _semver_key(a) < _semver_key(b)
 
 
-def _matching_range(record, name, version):
+def _matching_range(record, name, version, ecosystem="npm"):
     """Return (introduced, fixed|None, last_affected|None) of the range containing version."""
     fallback = None
     for aff in record.get("affected", []):
         pkg = aff.get("package", {})
-        if pkg.get("ecosystem") != "npm" or pkg.get("name") != name:
+        if pkg.get("ecosystem") != OSV_ECOSYSTEM.get(ecosystem) or \
+                normalize_name(ecosystem, pkg.get("name", "")) != normalize_name(ecosystem, name):
             continue
         for rng in aff.get("ranges", []):
             if rng.get("type") not in ("SEMVER", "ECOSYSTEM"):
@@ -154,11 +169,25 @@ def scan_components(comps, cache_dir, offline=False, workers=16):
     """Mutates components in place; returns a list of per-advisory finding dicts."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    purls = sorted(comps)
+    # only exact versions in ecosystems OSV covers can be matched to advisories
+    purls = sorted(cid for cid, c in comps.items() if c.version and c.ecosystem in OSV_ECOSYSTEM)
     ids_by_purl = _query_ids(purls, cache_dir, offline)
     unique = sorted({v for ids in ids_by_purl.values() for v in ids})
     with ThreadPoolExecutor(workers) as ex:
         records = dict(zip(unique, ex.map(lambda v: _fetch_vuln(v, cache_dir, offline), unique)))
+    # Go/PyPI records often carry no severity; their GHSA alias usually does
+    need = {vid: next((a for a in rec.get("aliases", []) if a.startswith("GHSA-")), None)
+            for vid, (rec, _) in records.items() if not _has_severity(rec)}
+    alias_ids = sorted({a for a in need.values() if a})
+    with ThreadPoolExecutor(workers) as ex:
+        alias_recs = dict(zip(alias_ids, ex.map(lambda v: _safe_fetch(v, cache_dir, offline), alias_ids)))
+    for vid, a in need.items():
+        ar = alias_recs.get(a)
+        if ar:
+            rec, ev = records[vid]
+            rec = dict(rec, severity=ar.get("severity", []), database_specific={**rec.get("database_specific", {}),
+                       "severity": (ar.get("database_specific") or {}).get("severity"), "severity_from": a})
+            records[vid] = (rec, ev)
 
     findings = []
     for purl in purls:
@@ -173,7 +202,7 @@ def scan_components(comps, cache_dir, offline=False, workers=16):
             score = cvss3_score(vector) if vector else None
             label = _band(score) or (rec.get("database_specific", {}).get("severity") or "UNKNOWN").upper()
             label = "MEDIUM" if label == "MODERATE" else label
-            intro, fixed, last = _matching_range(rec, c.name, c.version)
+            intro, fixed, last = _matching_range(rec, c.name, c.version, c.ecosystem)
             cves = [a for a in rec.get("aliases", []) if a.startswith("CVE-")]
             per_adv.append({
                 "finding_id": f"{vid}:{purl}", "rule_id": "OSV", "category": "vulnerability",
