@@ -176,6 +176,8 @@ def scan_components(comps, cache_dir, offline=False, workers=16):
             intro, fixed, last = _matching_range(rec, c.name, c.version)
             cves = [a for a in rec.get("aliases", []) if a.startswith("CVE-")]
             per_adv.append({
+                "finding_id": f"{vid}:{purl}", "rule_id": "OSV", "category": "vulnerability",
+                "title": rec.get("summary") or vid,
                 "component_id": purl, "advisory_id": vid, "aliases": rec.get("aliases", []),
                 "cves": cves, "summary": rec.get("summary", ""), "cvss_vector": vector,
                 "cvss": score, "severity": label,
