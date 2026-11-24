@@ -101,7 +101,8 @@ def write(state):
         L.append(f"| — | Escalated: {e['reason']} ({len(e['finding_ids'])} findings) | — | human decision | — | — |")
     if applied:
         L += ["", "## Applied to the repository", "",
-              "Only verified fixes are written, on a local branch with one commit per fix. Nothing is pushed.", ""]
+              "Written: verified fixes, and static-only fixes whose rescan was clean (each entry says which). Failed or incomplete "
+              "fixes are never written. Local branch, one commit per fix; nothing is pushed.", ""]
         L += [f"- `{a['candidate_id']}` **{a['status']}**{' `' + a['commit'] + '`' if a.get('commit') else ''}: "
               f"{a['detail']}{' (' + ', '.join(a['files']) + ')' if a.get('files') else ''}" for a in applied.values()]
     if s.validations:
