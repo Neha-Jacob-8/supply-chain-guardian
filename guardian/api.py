@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -57,6 +57,12 @@ class WaiveFindingRequest(BaseModel):
     reason: str = "Verified safe / accepted risk by human reviewer"
     action: str = "waive"             # waive | unwaive
     by: str = "human reviewer (dashboard)"
+
+
+class GitHubPRRequest(BaseModel):
+    app_id: str | None = None
+    pem_path: str | None = None
+    installation_id: str | None = None
 
 
 def create_app(out_dir="output"):
@@ -404,6 +410,51 @@ def create_app(out_dir="output"):
     @app.get("/api/report.json")
     def report_json():
         return load("report.json")
+
+    @app.get("/api/report.pdf")
+    def report_pdf():
+        from .reporting.pdf import markdown_to_pdf_bytes
+        pdf_path = out / "report.pdf"
+        if pdf_path.exists():
+            data = pdf_path.read_bytes()
+        else:
+            md_path = out / "report.md"
+            if not md_path.exists():
+                raise HTTPException(404, "report not available yet")
+            data = markdown_to_pdf_bytes(md_path.read_text())
+        return Response(
+            content=data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="guardian-security-report.pdf"'},
+        )
+
+    @app.post("/api/report/pr")
+    def raise_github_pr(req: GitHubPRRequest):
+        if running():
+            raise HTTPException(409, "wait for the current job to finish")
+        from .remediation.github_pr import create_remediation_pr
+        st = load("run_state.json", {})
+        repo = st.get("repo") or load("inventory.json", {}).get("repo")
+        if not repo or not Path(repo).is_dir():
+            raise HTTPException(400, "No active repository found")
+        try:
+            res = create_remediation_pr(
+                repo, out, app_id=req.app_id, pem_path=req.pem_path, installation_id=req.installation_id
+            )
+        except Exception as e:
+            raise HTTPException(400, str(e))
+        st["pull_request"] = res
+        (out / "run_state.json").write_text(json.dumps(st, indent=2, default=str))
+        if (out / "report.json").exists():
+            rj = json.loads((out / "report.json").read_text())
+            rj["pull_request"] = res
+            (out / "report.json").write_text(json.dumps(rj, indent=2, default=str))
+        with open(out / "events.jsonl", "a") as ev:
+            ev.write(json.dumps({
+                "t": time.time(), "stage": "report", "actor": "github_app",
+                "kind": "pull_request_created", "detail": res,
+            }) + "\n")
+        return res
 
     if WEB.is_dir():
         app.mount("/ui", StaticFiles(directory=WEB, html=True), name="ui")
