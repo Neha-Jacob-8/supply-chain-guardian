@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+*.pem
 
 # ---- Private documents ----
 # Problem statement is Bosch-internal; never commit it
