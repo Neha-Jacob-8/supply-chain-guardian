@@ -43,7 +43,7 @@ validation remains partial),
 | 4 Defense agent (Blue Team) | LLM + read-only tools | fix proposals chosen from computed candidates; patch-less fixes escalate to a human |
 | Approval gate | human | approve / reject each fix (dashboard or CLI) |
 | 5 Validation agent | deterministic | patch a copy, regenerate lockfile safely, rescan, run only a trusted profile's tests/smoke checks → verified / partial / failed |
-| Apply | code | verified fixes only: written to the repository on a local branch `guardian/remediation-<time>`, one commit per fix (never pushed); `remediation.patch` |
+| Apply | code | approved fixes that passed validation (verified, or static-only with a clean rescan) are written to a local branch `guardian/remediation-<time>`, one commit per fix (never pushed); `remediation.patch` |
 | Report | code | `report.md` + `report.json`, audit trail in `events.jsonl` |
 
 Details: [docs/requirements.md](docs/requirements.md) · [docs/implementation.md](docs/implementation.md) ·
@@ -108,7 +108,7 @@ guardian/
   policies/                      risk weights, end-of-life dates, smoke profiles (editable data)
   web/                           dashboard (HTML/CSS/JS, served by `guardian serve`)
 scripts/seed_demo.py             local lockfile-tamper demo branch
-tests/                           44 unit tests (no network, no API key; optional SDK shape test uses anthropic)
+tests/                           54 unit tests (no network, no API key; optional SDK shape test uses anthropic)
 docs/                            requirements, architecture, implementation, operations, presentation, responsible AI, demo
 ```
 
@@ -127,7 +127,7 @@ never runs on the host: lockfile regeneration uses `--ignore-scripts` and runs i
 Unknown repositories never execute arbitrary Dockerfiles/Compose; runtime checks require an allowlisted remote
 identity and pass a host-escape policy first. Repository secrets are redacted before anything reaches an LLM.
 A fix reaches the repository only after human
-approval and a `verified` validation, and then only as a local branch commit (git hooks disabled); nothing is merged,
+approval and a passing validation, and then only as a local branch commit (git hooks disabled); nothing is merged,
 pushed or deployed automatically.
 
 ## Known limitations
