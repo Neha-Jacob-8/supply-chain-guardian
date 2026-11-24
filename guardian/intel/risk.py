@@ -18,7 +18,9 @@ import urllib.request
 from pathlib import Path
 
 from ..config import cache_is_fresh
+from ..discovery.purl import normalize_name
 from ..policies import load as load_policy
+from .crawler import dist_to_py_modules
 
 _W = load_policy("risk_weights.json")
 LABEL_CVSS = _W["label_to_cvss"]
@@ -71,21 +73,20 @@ def load_intel(cves, cache_dir, offline=False):
 
 # ---------- package-level reachability ----------
 
-PY_MODULE = {"pyyaml": "yaml", "beautifulsoup4": "bs4", "pillow": "PIL", "scikit-learn": "sklearn",
-             "python-dateutil": "dateutil", "opencv-python": "cv2", "protobuf": "google.protobuf",
-             "pyjwt": "jwt", "python-dotenv": "dotenv", "pycryptodome": "Crypto", "attrs": "attr", "msgpack-python": "msgpack"}
 SKIP = {"node_modules", ".git", "vendor", "target", ".venv", "venv", "site-packages", "dist", "build"}
 
 
-def _patterns(eco, name):
+def _patterns(eco, name, py_mod_map=None):
     """(file suffixes, regex) that show application code importing the package."""
     q = re.escape
     if eco == "npm":
         return (".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"), re.compile(
             r"""(require\(\s*|from\s+|import\s+)['"]""" + q(name) + r"""(/[^'"]*)?['"]""")
     if eco == "pypi":
-        mod = PY_MODULE.get(name, name.replace("-", "_"))
-        return (".py",), re.compile(r"^\s*(import|from)\s+" + q(mod) + r"(\.|\s|$)", re.I)
+        norm = normalize_name("pypi", name)
+        mods = set((py_mod_map or {}).get(norm) or ()) | {name.replace("-", "_"), norm.replace("-", "_")}
+        alt = "|".join(q(m) for m in sorted(mods) if m)
+        return (".py",), re.compile(r"^\s*(import|from)\s+(?:" + alt + r")(\.|\s|$)", re.I)
     if eco == "golang":
         return (".go",), re.compile(r'"' + q(name) + r'(/[^"]*)?"')
     if eco == "cargo":
@@ -104,7 +105,8 @@ def import_usage(repo, names, ecosystem="npm"):
 def import_usage_multi(repo, keys, as_names=False):
     """{(ecosystem, name)} -> {(ecosystem, name): [file:line] | None (unsupported ecosystem)}."""
     repo = Path(repo)
-    pats = {k: _patterns(*k) for k in keys}
+    py_mod_map = dist_to_py_modules(repo) if any(k[0] == "pypi" for k in keys) else {}
+    pats = {k: _patterns(*k, py_mod_map=py_mod_map) for k in keys}
     hits = {k: ([] if pats[k][1] else None) for k in keys}
     active = {k: v for k, v in pats.items() if v[1]}
     suffixes = {sfx for v in active.values() for sfx in v[0]}
@@ -133,7 +135,7 @@ def score_all(findings, comps, repo, intel_cache, offline=False):
     kev, epss = load_intel(cves, intel_cache, offline)
     out = {}
     for f in findings:
-        out[f["finding_id"]] = (_score_vuln if f["category"] == "vulnerability" else _score_indicator)(
+        out[f["finding_id"]] = (_score_vuln if f["category"] in ("vulnerability", "malicious") and f.get("rule_id") in ("OSV", "OSV-MAL") else _score_indicator)(
             f, comps, usage, kev, epss)
     return out, usage
 

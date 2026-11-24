@@ -82,21 +82,22 @@ $('#runForm').addEventListener('submit', async e => {
   e.preventDefault();
   const target = $('#target').value.trim();
   if (!target) { $('#target').focus(); return; }
+  const auto_merge = !!$('#autoMergeToggle')?.checked;
   try {
-    await post('/runs', { target, llm: $('#llm').value });
+    await post('/runs', { target, llm: $('#llm').value, auto_merge });
     S.events = []; S.lastT = 0; renderEvents();
-    banner('Run started: cloning and analysing…', 'info'); poll();
+    banner(auto_merge ? 'Autonomous run started: cloning, analysing, generating tests & auto-merging passing fixes…' : 'Run started: cloning and analysing…', 'info'); poll();
   } catch (err) { banner(esc(err.message)); }
 });
 
 /* ---------------- load all data ---------------- */
 async function loadAll() {
   const safe = p => get(p).catch(() => null);
-  const [ov, graph, matrix, findings, inv, pri, props, vals, escs, gaps, changes, inventory] = await Promise.all([
+  const [ov, graph, matrix, findings, inv, pri, props, vals, escs, gaps, changes, inventory, integrity] = await Promise.all([
     safe('/overview'), safe('/graph'), safe('/matrix?limit=5000'), safe('/findings?limit=5000'), safe('/investigations'),
-    safe('/priorities'), safe('/proposals'), safe('/validations'), safe('/escalations'), safe('/coverage'), safe('/changes'), safe('/inventory')]);
+    safe('/priorities'), safe('/proposals'), safe('/validations'), safe('/escalations'), safe('/coverage'), safe('/changes'), safe('/inventory'), safe('/integrity')]);
   Object.assign(S, { overview: ov, graph, matrix: matrix?.rows || [], findings: findings?.findings || [], inv: inv || [],
-    pri: pri || [], props: props || [], vals: vals || [], escs: escs || [], gaps: gaps || [], changes: changes || [], inventory: inventory || {} });
+    pri: pri || [], props: props || [], vals: vals || [], escs: escs || [], gaps: gaps || [], changes: changes || [], inventory: inventory || {}, integrity: integrity || {} });
   S.compIndex = Object.fromEntries(S.matrix.map(r => [r.component_id, r]));
   S.findByComp = {}; S.findings.forEach(f => (S.findByComp[f.component_id] ||= []).push(f));
   fillEcoSelects(); renderOverview(); renderMatrix(); renderFindings(); renderAgents(); renderRemediation(); renderValidation(); renderCoverage();
@@ -132,6 +133,22 @@ function renderOverview() {
   $('#changes').innerHTML = S.changes.length ? S.changes.slice(0, 12).map(c => `<div><span class="chip">${esc(c.date || '')}</span><code>${esc(c.commit)}</code><b>${esc(c.subject || '')}</b>
       <span class="muted">${c.note ? esc(c.note) : `+${c.added} / −${c.removed} / ~${c.version_changed}${c.hash_algorithm_upgrades ? ` · ${c.hash_algorithm_upgrades} hash upgrades (benign)` : ''}`}</span></div>`).join('')
     : '<p class="muted">No lockfile history (only npm lockfiles are diffed across commits).</p>';
+  const ig = S.integrity || {};
+  if ($('#integrityBox')) {
+    const baseChip = ig.has_baseline ? chip(ig.baseline_ok ? 'Merkle Baseline OK' : `Merkle Tamper (${(ig.anomalies || []).length})`, ig.baseline_ok ? 'v-verified' : 'v-failed') : chip('No Merkle baseline yet', 'ghost');
+    const ledChip = ig.has_ledger ? chip(ig.ledger_ok ? 'Hash-Chained Ledger OK' : 'Ledger Chain Broken', ig.ledger_ok ? 'v-verified' : 'v-failed') : chip('No Ledger yet', 'ghost');
+    $('#integrityBox').innerHTML = `${baseChip} ${ledChip} <span class="muted" style="font-size:12px">${esc(ig.ledger_message || '')}</span>
+      <input id="signKeyInput" type="password" placeholder="Signing passphrase (or uses .env)" style="margin-left:auto;max-width:220px;padding:4px 8px;font-size:12px">
+      <button class="btn" id="signBaselineBtn">Sign Merkle Baseline</button>`;
+    $('#signBaselineBtn')?.addEventListener('click', async () => {
+      try {
+        const key = $('#signKeyInput')?.value.trim() || null;
+        const res = await post('/integrity/baseline', { key, signer: 'developer (dashboard)' });
+        banner(`Signed 4096B Merkle baseline (${res.files} files, HMAC ${String(res.hmac || '').slice(0, 14)}…)`, 'info');
+        await loadAll();
+      } catch (e) { banner(esc(e.message)); }
+    });
+  }
 }
 
 /* ---------------- network ---------------- */
@@ -139,6 +156,7 @@ let FG = null, netShow = 'all';
 const nodeColor = n => {
   if (n.type === 'root') return css('--accent');
   if (n.type === 'project') return css('--text');
+  if (n.risk_status === 'malicious') return css('--critical');
   if (n.risk_status === 'vulnerable') return css({ CRITICAL: '--critical', HIGH: '--high', MEDIUM: '--medium', LOW: '--low' }[n.severity] || '--info');
   if (n.risk_status === 'suspicious') return css('--suspicious');
   if (n.risk_status === 'maintenance') return css('--maintenance');
@@ -356,12 +374,15 @@ $('#dClose').addEventListener('click', () => $('#drawer').hidden = true);
 /* ---------------- remediation ---------------- */
 function renderRemediation() {
   const vmap = Object.fromEntries(S.vals.map(v => [v.candidate_id, v.verdict]));
+  const mmap = Object.fromEntries(S.vals.map(v => [v.candidate_id, v]));
   const pending = S.props.filter(p => (p.approval || {}).status === 'pending').length;
   $('#pendingCount').textContent = pending || '';
   $('#props').innerHTML = S.props.map((p, i) => {
-    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id];
+    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], valObj = mmap[p.candidate_id];
+    const mergedChip = valObj?.merged ? chip('Auto-Merged', 'v-verified') : '';
+    const testChip = valObj?.test_info ? chip(valObj.test_info.kind === 'generated' ? 'LLM/Smoke Test Generated' : 'Existing Tests', 'ghost') : '';
     return `<div class="card ${verdict ? 'v-' + verdict : 'v-' + st}" style="--c:var(--c);animation-delay:${i * 40}ms" data-id="${esc(p.candidate_id)}">
-      <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
+      <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}${mergedChip}${testChip}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
       <h4>${esc(p.summary)}</h4><p style="margin:0 0 8px">${esc(p.rationale)}</p>
       <dl class="kv"><dt>Compatibility</dt><dd>${esc(p.compat_assessment)}</dd><dt>Expected</dt><dd>${esc(p.expected_risk_reduction)}${/prediction/i.test(p.expected_risk_reduction || '') ? '' : ' <span class="muted">(prediction)</span>'}</dd><dt>Rollback</dt><dd>${esc(p.rollback)}</dd></dl>
       <div class="actions">${st === 'pending' ? `<button class="btn ok" data-a="approve">Approve</button><button class="btn no" data-a="reject">Reject</button>` : ''}<button class="btn" data-diff>View diff</button></div><div class="diffbox"></div></div>`;
@@ -396,12 +417,15 @@ function renderValidation() {
     const c = v.comparison || {}, b = c.before || {}, a = c.after || {};
     const delta = (x, y) => { const d = (y ?? 0) - (x ?? 0); return d ? `<span class="${d < 0 ? 'delta-down' : 'delta-up'}">${d > 0 ? '+' : ''}${d}</span>` : '<span class="muted">±0</span>'; };
     const runtimeLabel = x => x === null || x === undefined ? 'n/a' : x ? 'pass' : 'fail';
-    return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || '')}</span></div>${chip(v.verdict, 'v-' + v.verdict)}</div>
+    const ti = v.test_info;
+    return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || v.validated_by || '')}</span></div><div class="row2">${v.merged ? chip('Auto-Merged', 'v-verified') : ''}${chip(v.verdict, 'v-' + v.verdict)}</div></div>
       <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
-          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' || s.name === 'run_tests' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>
           <div><span>Targets resolved</span><b>${(c.resolved || []).length}/${c.targets}</b></div><div><span>Newly introduced</span><b>${c.introduced_count}</b> ${(c.introduced_high || []).length ? chip(`${c.introduced_high.length} high`, 'sev-HIGH') : ''}</div>
-          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>` : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
+          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>`
+          : ti ? `<div class="nums"><div><span>Test source</span><b>${esc(ti.kind)}</b></div><div><span>Generator</span><b>${esc(ti.generator || 'existing')}</b></div><div><span>Files</span><b class="mono">${esc((ti.files || []).join(', '))}</b></div><div><span>Auto-merged</span><b>${v.merged ? 'yes' : 'no'}</b></div></div>`
+          : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
   }).join('') || '<div class="empty">No validations yet. Approve fixes under Remediation, then run independent validation.</div>';
 }
 

@@ -19,6 +19,7 @@ from ..validation import baseline_smoke, validate
 from .llm import get_llm
 from .attack import AttackAgent
 from .defense import DefenseAgent
+from .integrity_agent import IntegrityAgent
 from .risk_analyst import RiskAgent
 from .state import RunState
 
@@ -57,6 +58,13 @@ class Orchestrator:
             return False
         s.inventory, s.comps, s.changes, s.gaps = inv, comps, changes, inv["gaps"]
         s.identity = repository_identity(s.repo)
+        # Ensure initial signed 4096-byte Merkle baseline + hash-chained ledger exist automatically
+        if not (s.repo / ".guardian" / "baseline.json").exists() and not (s.repo / ".truststack" / "baseline.json").exists():
+            from ..integrity import create_baseline
+            try:
+                create_baseline(s.repo, signer="guardian-initial-scan")
+            except Exception:
+                pass
         s.set_findings(findings)
         s.risk, s.usage = risk.score_all(findings, comps, s.repo, s.out / "cache" / "intel", self.offline)
         for f in findings:            # additive field for the dashboard
@@ -68,13 +76,25 @@ class Orchestrator:
 
     def investigate(self):
         agent = AttackAgent()
-        if not agent.candidates(self.state):
+        int_agent = IntegrityAgent()
+        has_attack = bool(agent.candidates(self.state))
+        has_integrity = bool(int_agent.candidates(self.state))
+        if not has_attack and not has_integrity:
             self.decide("skip Red Team", "no suspicious indicator scored >= 40")
             return
         self._stage("investigate")
-        res = agent.run(self.state, self.llm)
-        self.state.investigations = [dict(i, mode=res["mode"]) for i in res["investigations"]]
-        print(f"  {len(self.state.investigations)} investigations ({res['mode']})")
+        invs = []
+        mode = "none"
+        if has_attack:
+            res = agent.run(self.state, self.llm)
+            mode = res["mode"]
+            invs.extend(dict(i, mode=res["mode"]) for i in res["investigations"])
+        if has_integrity:
+            ires = int_agent.run(self.state, self.llm)
+            mode = ires["mode"] if mode == "none" else mode
+            invs.extend(dict(i, mode=f"integrity ({ires['mode']})") for i in ires["investigations"])
+        self.state.investigations = invs
+        print(f"  {len(self.state.investigations)} investigations ({mode})")
 
     def analyze(self):
         self._stage("analyze")
@@ -185,16 +205,47 @@ class Orchestrator:
                 and set(c["closes"]) & set(cand["closes"]) and c["candidate_id"] not in self.state.approvals]
         return min(alts, key=lambda c: risk_rank[c["change_risk"]]) if alts else None
 
+    def auto_mitigate(self, candidate_ids=None, auto_merge=True):
+        """Run LLM/fallback test discovery/generation in sandbox and auto-merge passing candidates."""
+        from ..validation.auto_mitigate import auto_mitigate_candidate
+        self._stage("validate")
+        s = self.state
+        by_id = {c["candidate_id"]: c for c in s.candidates}
+        targets = candidate_ids or [
+            p["candidate_id"] for p in s.proposals
+            if s.approvals.get(p["candidate_id"], {}).get("status") == "approved"
+        ]
+        results = []
+        for cid in targets:
+            if cid not in by_id or not by_id[cid].get("files"):
+                continue
+            res = auto_mitigate_candidate(s, by_id[cid], llm=self.llm, auto_merge=auto_merge)
+            s.validations = [v for v in s.validations if v["candidate_id"] != cid] + [res]
+            results.append(res)
+            print(f"  auto-mitigate {cid}: {res['verdict']} (merged={res['merged']})")
+        return results
+
     def finish(self):
+        from ..integrity import append_ledger_record
         self._stage("report")
         paths = write_report(self.state)
         self.state.stage = "done"
         self.state.save()
+        if (self.state.repo / ".guardian" / "ledger.jsonl").exists():
+            try:
+                append_ledger_record(self.state.repo, {
+                    "event": "run_completed",
+                    "repo": str(self.state.repo),
+                    "findings": len(self.state.findings),
+                    "validations": len(self.state.validations),
+                })
+            except Exception:
+                pass
         print(f"  wrote {', '.join(paths)}")
 
     # ---------- entry points ----------
 
-    def run(self, approve=None, interactive=False):
+    def run(self, approve=None, interactive=False, auto_merge=False):
         for stale in ("events.jsonl", "report.md", "report.json"):   # a new run starts a new audit trail
             (self.state.out / stale).unlink(missing_ok=True)
         self.state.log("orchestrator", "run_started", {"repo": str(self.state.repo), "llm": self.state.llm_mode})
@@ -203,14 +254,17 @@ class Orchestrator:
         self.investigate()
         self.analyze()
         self.remediate()
-        approved = self.approval_gate(approve, interactive)
+        approved = self.approval_gate("all" if (auto_merge and approve is None) else approve, interactive)
         self.state.save()
         if not approved:
             self.decide("pause for human approval", "no remediation is approved; nothing is applied")
             print(f"  review {self.state.out}/report.md, then: python -m guardian.cli approve --ids <id,...> ; "
                   f"python -m guardian.cli resume {self.state.repo}")
             return self.finish()
-        self.validate()
+        if auto_merge:
+            self.auto_mitigate(auto_merge=True)
+        else:
+            self.validate()
         self.finish()
 
     def resume(self):

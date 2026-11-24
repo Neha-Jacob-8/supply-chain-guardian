@@ -16,7 +16,10 @@ import time
 import urllib.parse
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from ..discovery import build_inventory
 from ..intel.detectors import run_detectors
@@ -56,6 +59,46 @@ def _outside_repo(work, source, base=None):
         return True
 
 
+def _minimal_yaml_load(text):
+    """Minimal indentation-based YAML subset parser used when PyYAML is not installed."""
+    if yaml is not None:
+        return yaml.safe_load(text) or {}
+    root = {}
+    # stack entries: (indent, container_dict, last_key)
+    stack = [(-1, root, None)]
+    for raw in text.splitlines():
+        s = raw.split("#", 1)[0].rstrip()
+        if not s.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        stripped = s.strip()
+        while len(stack) > 1 and (indent < stack[-1][0] or (indent == stack[-1][0] and not (stripped.startswith("- ") and isinstance(stack[-1][1], list)))):
+            stack.pop()
+        _, parent, last_key = stack[-1]
+        stripped = s.strip()
+        if stripped.startswith("- "):
+            val = stripped[2:].strip().strip("'\"")
+            if len(stack) > 1 and isinstance(stack[-2][1], dict) and stack[-2][2] is not None and parent == {}:
+                p_dict, p_key = stack[-2][1], stack[-2][2]
+                p_dict[p_key] = [val]
+                stack[-1] = (indent, p_dict[p_key], None)
+            elif isinstance(parent, list):
+                parent.append(val)
+        elif ":" in stripped:
+            k, _, v = stripped.partition(":")
+            k, v = k.strip(), v.strip()
+            if isinstance(parent, dict):
+                if not v:
+                    parent[k] = {}
+                    stack[-1] = (stack[-1][0], parent, k)
+                    stack.append((indent, parent[k], None))
+                else:
+                    vl = v.strip("'\"")
+                    parent[k] = True if vl.lower() == "true" else False if vl.lower() == "false" else vl
+                    stack[-1] = (stack[-1][0], parent, k)
+    return root
+
+
 def compose_policy_violations(work):
     """Return unsafe Compose constructs before any target container is started.
 
@@ -65,7 +108,7 @@ def compose_policy_violations(work):
     violations = []
     for path in _compose_files(work):
         try:
-            data = yaml.safe_load(path.read_text()) or {}
+            data = _minimal_yaml_load(path.read_text()) or {}
         except Exception as exc:
             violations.append(f"{path.name}: invalid YAML ({type(exc).__name__})")
             continue

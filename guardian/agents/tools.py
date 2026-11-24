@@ -207,3 +207,24 @@ def get_fix_options(state, finding_id, component):
             rows.append({k: c[k] for k in ("candidate_id", "action", "summary", "change_risk", "compat_notes",
                                            "rollback", "requires", "needs_lockfile_regen")} | {"closes_count": len(c["closes"])})
     return {"candidates": rows[:10]}
+
+
+@tool("verify_merkle_baseline", "Verify the developer-signed 4096-byte Merkle-tree chunk baseline (.guardian/baseline.json) "
+      "and report exact tampered chunks, byte offsets, and modified lines.",
+      {"rounds": {"type": "integer", "description": "number of verification rounds (1-5)"}})
+def verify_merkle_baseline(state, rounds):
+    from ..integrity import run_watch
+    try:
+        anomalies = run_watch(state.repo, interval=0, rounds=max(1, min(rounds, 5)), full_check_every=1)
+        return {"ok": len(anomalies) == 0, "anomalies_count": len(anomalies), "anomalies": anomalies[:20]}
+    except FileNotFoundError as e:
+        return {"ok": None, "note": str(e)}
+
+
+@tool("verify_audit_ledger", "Verify every cryptographic hash link (prev_hash -> record_hash) and HMAC signature "
+      "in the tamper-evident audit ledger (.guardian/ledger.jsonl).",
+      {})
+def verify_audit_ledger(state):
+    from ..integrity import verify_ledger
+    ok, msg, info = verify_ledger(state.repo)
+    return {"ok": ok, "message": msg, "detail": info}

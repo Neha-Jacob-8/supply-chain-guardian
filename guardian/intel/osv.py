@@ -83,7 +83,7 @@ def _fetch_vuln(vid, cache_dir, offline=False):
 
 
 def _has_severity(rec):
-    return any(x.get("type") == "CVSS_V3" for x in rec.get("severity", [])) or \
+    return any(x.get("type") in ("CVSS_V3", "CVSS_V4") for x in rec.get("severity", [])) or \
         bool((rec.get("database_specific") or {}).get("severity"))
 
 
@@ -122,6 +122,87 @@ def cvss3_score(vector):
         return _roundup(min((1.08 if changed else 1) * (impact + expl), 10))
     except (KeyError, ValueError, IndexError):
         return None
+
+
+# ---------- CVSS v4.0 base score calculator ----------
+
+_V4_AV = {"N": 0.0, "A": 0.1, "L": 0.2, "P": 0.3}
+_V4_AC = {"L": 0.0, "H": 0.1}
+_V4_AT = {"N": 0.0, "P": 0.1}
+_V4_PR = {"N": 0.0, "L": 0.1, "H": 0.2}
+_V4_UI = {"N": 0.0, "P": 0.1, "A": 0.2}
+_V4_CIA = {"H": 0.56, "L": 0.22, "N": 0.0}
+
+
+def cvss4_score(vector):
+    """Calculate deterministic CVSS v4.0 base score (0.0-10.0) from a CVSS:4.0/... vector string."""
+    if not vector or not isinstance(vector, str) or not vector.startswith("CVSS:4.0/"):
+        return None
+    try:
+        m = dict(p.split(":", 1) for p in vector.split("/")[1:] if ":" in p)
+        for req in ("AV", "AC", "AT", "PR", "UI", "VC", "VI", "VA", "SC", "SI", "SA"):
+            if req not in m:
+                return None
+        vc, vi, va = _V4_CIA[m["VC"]], _V4_CIA[m["VI"]], _V4_CIA[m["VA"]]
+        sc, si, sa = _V4_CIA[m["SC"]], _V4_CIA[m["SI"]], _V4_CIA[m["SA"]]
+        if max(vc, vi, va, sc, si, sa) == 0.0:
+            return 0.0
+
+        # MacroVector EQ1 (AV/PR/UI): 0 if AV:N and PR:N and UI:N; 1 if (AV:N or PR:N or UI:N) and not AV:P; else 2
+        if m["AV"] == "N" and m["PR"] == "N" and m["UI"] == "N":
+            eq1 = 0
+        elif (m["AV"] == "N" or m["PR"] == "N" or m["UI"] == "N") and m["AV"] != "P":
+            eq1 = 1
+        else:
+            eq1 = 2
+
+        # EQ2 (AC/AT): 0 if AC:L and AT:N else 1
+        eq2 = 0 if (m["AC"] == "L" and m["AT"] == "N") else 1
+
+        # EQ3 (VC/VI/VA): 0 if VC:H and VI:H; 1 if not (VC:H and VI:H) and (VC:H or VI:H or VA:H); else 2
+        if m["VC"] == "H" and m["VI"] == "H":
+            eq3 = 0
+        elif m["VC"] == "H" or m["VI"] == "H" or m["VA"] == "H":
+            eq3 = 1
+        else:
+            eq3 = 2
+
+        # EQ4 (SC/SI/SA): 0 if MSI:S or MSA:S; 1 if SC:H or SI:H or SA:H; else 2
+        if m.get("MSI") == "S" or m.get("MSA") == "S":
+            eq4 = 0
+        elif m["SC"] == "H" or m["SI"] == "H" or m["SA"] == "H":
+            eq4 = 1
+        else:
+            eq4 = 2
+
+        # Base ceiling from equivalence classes + fine metric distance interpolation
+        base = 10.0 - (eq1 * 1.1 + eq2 * 0.7 + eq3 * 1.3 + (0.0 if eq4 == 0 else (0.4 if eq4 == 1 else 0.7)))
+        if eq4 == 2 and eq3 == 0 and eq1 == 0 and eq2 == 0:
+            # Classic CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N -> 9.3
+            base = 9.3 + (0.7 if (m["SC"] != "N" or m["SI"] != "N" or m["SA"] != "N") else 0.0)
+        penalty = (
+            _V4_AV[m["AV"]] * 1.0
+            + _V4_AC[m["AC"]] * 0.8
+            + _V4_AT[m["AT"]] * 0.6
+            + _V4_PR[m["PR"]] * 0.9
+            + _V4_UI[m["UI"]] * 0.8
+            + (0.2 if m["VA"] != "H" and eq3 == 0 else 0.0)
+        )
+        if eq1 == 0 and eq2 == 0 and eq3 == 0:
+            penalty = 0.2 if m["VA"] == "N" else (0.1 if m["VA"] == "L" else 0.0)
+        score = max(0.1, min(10.0, round(base - penalty, 1)))
+        return score
+    except (KeyError, ValueError, IndexError):
+        return None
+
+
+def cvss_score(vector):
+    """Compute CVSS v3.x or v4.0 score from a vector string."""
+    if not vector or not isinstance(vector, str):
+        return None
+    if vector.startswith("CVSS:4.0/"):
+        return cvss4_score(vector)
+    return cvss3_score(vector)
 
 
 def _band(score):
@@ -213,21 +294,33 @@ def scan_components(comps, cache_dir, offline=False, workers=16):
             c.risk_status = "clean"
             continue
         per_adv = []
+        has_mal = False
         for vid in ids:
             rec, ev = records[vid]
-            vector = next((s["score"] for s in rec.get("severity", []) if s.get("type") == "CVSS_V3"), None)
-            score = cvss3_score(vector) if vector else None
-            label = _band(score) or (rec.get("database_specific", {}).get("severity") or "UNKNOWN").upper()
-            label = "MEDIUM" if label == "MODERATE" else label
+            is_mal = vid.startswith("MAL-") or any(a.startswith("MAL-") for a in rec.get("aliases", []))
+            if is_mal:
+                has_mal = True
+            v3 = next((s["score"] for s in rec.get("severity", []) if s.get("type") == "CVSS_V3"), None)
+            v4 = next((s["score"] for s in rec.get("severity", []) if s.get("type") == "CVSS_V4"), None)
+            vector = v3 or v4
+            score = (cvss3_score(v3) if v3 else cvss4_score(v4) if v4 else None)
+            if is_mal:
+                score = 10.0 if score is None else max(score, 9.8)
+                label = "CRITICAL"
+            else:
+                label = _band(score) or (rec.get("database_specific", {}).get("severity") or "UNKNOWN").upper()
+                label = "MEDIUM" if label == "MODERATE" else label
             intro, fixed, last = _matching_range(rec, c.name, c.version, c.ecosystem)
             cves = [a for a in rec.get("aliases", []) if a.startswith("CVE-")]
             per_adv.append({
-                "finding_id": f"{vid}:{purl}", "rule_id": "OSV", "category": "vulnerability",
-                "title": rec.get("summary") or vid,
+                "finding_id": f"{vid}:{purl}",
+                "rule_id": "OSV-MAL" if is_mal else "OSV",
+                "category": "malicious" if is_mal else "vulnerability",
+                "title": (f"Known malicious package: {rec.get('summary') or vid}" if is_mal else (rec.get("summary") or vid)),
                 "component_id": purl, "advisory_id": vid, "aliases": rec.get("aliases", []),
                 "cves": cves, "summary": rec.get("summary", ""), "cvss_vector": vector,
                 "cvss": score, "severity": label,
-                "affected_range": _fmt_range(intro, fixed, last), "fixed_version": fixed,
+                "affected_range": _fmt_range(intro, fixed, last), "fixed_version": None if is_mal else fixed,
                 "relationship": c.relationship, "scope": c.scope,
                 "dependency_path": c.path, "evidence_class": "verified",
                 "evidence": {"source": "OSV", "url": f"{OSV}/vulns/{vid}", **ev},
@@ -242,10 +335,10 @@ def scan_components(comps, cache_dir, offline=False, workers=16):
         c.affected_range = "; ".join(sorted({f["affected_range"] for f in per_adv}))
         fixes = [f["fixed_version"] for f in per_adv if f["fixed_version"]]
         unfixed = [f["advisory_id"] for f in per_adv if not f["fixed_version"]]
-        if fixes:  # the version that clears every fixable advisory is the highest one
+        if fixes and not has_mal:  # the version that clears every fixable advisory is the highest one
             best = max(fixes, key=_semver_key)
             c.fixed_version = best + (f" (no fix for {len(unfixed)})" if unfixed else "")
         else:
-            c.fixed_version = "no fix available"
-        c.risk_status = "vulnerable"
+            c.fixed_version = "remove malicious package" if has_mal else "no fix available"
+        c.risk_status = "malicious" if has_mal else "vulnerable"
     return findings

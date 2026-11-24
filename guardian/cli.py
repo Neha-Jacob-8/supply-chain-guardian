@@ -26,6 +26,7 @@ def main():
     r.add_argument("--llm", choices=["auto", "claude", "gemini", "none"], default="auto", help="auto = Claude if credentials exist")
     r.add_argument("--approve", default=None, help="'all', 'low', 'none' or comma-separated candidate ids")
     r.add_argument("--no-smoke", action="store_true", help="skip docker build/boot smoke test in validation")
+    r.add_argument("--auto-merge", action="store_true", help="run LLM/fallback test generation in sandbox and auto-merge passing fixes")
     ap_ = sub.add_parser("approve"); ap_.add_argument("--out", default="output")
     ap_.add_argument("--ids", required=True, help="comma-separated candidate ids, or 'all' / 'low'")
     ap_.add_argument("--reject", action="store_true")
@@ -33,6 +34,15 @@ def main():
     rs.add_argument("--offline", action="store_true"); rs.add_argument("--history", type=int, default=20)
     rs.add_argument("--llm", choices=["auto", "claude", "gemini", "none"], default="auto")
     rs.add_argument("--no-smoke", action="store_true")
+    bs = sub.add_parser("baseline", help="Create developer-signed 4096B Merkle-tree chunk baseline and log to ledger")
+    bs.add_argument("repo"); bs.add_argument("--key", default=None, help="secret signing key/passphrase")
+    bs.add_argument("--signer", default="developer", help="signer identity recorded in baseline and ledger")
+    bs.add_argument("--venv", default=None, help="optional virtualenv path to include in baseline")
+    wt = sub.add_parser("watch", help="Run keyed random-chunk Merkle spot-checks against signed baseline")
+    wt.add_argument("repo"); wt.add_argument("--interval", type=int, default=2)
+    wt.add_argument("--rounds", type=int, default=3); wt.add_argument("--key", default=None)
+    vl = sub.add_parser("verify-ledger", help="Verify cryptographic hash chain and HMAC signatures in .guardian/ledger.jsonl")
+    vl.add_argument("repo"); vl.add_argument("--key", default=None)
     sv = sub.add_parser("serve", help="HTTP API for the dashboard (needs the [api] extra)")
     sv.add_argument("--out", default="output"); sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
@@ -43,6 +53,25 @@ def main():
     if getattr(a, "repo", None):
         from .ingestion import resolve_target
         a.repo = str(resolve_target(a.repo))
+    if a.cmd == "baseline":
+        from .integrity import create_baseline
+        doc = create_baseline(a.repo, venv_dir=a.venv, signing_key=a.key, signer=a.signer)
+        print(f"Signed Merkle baseline for {len(doc['files'])} file(s) -> {a.repo}/.guardian/baseline.json (HMAC {doc['hmac'][:16]}...)")
+        return
+    if a.cmd == "watch":
+        from .integrity import run_watch
+        anomalies = run_watch(a.repo, interval=a.interval, rounds=a.rounds, signing_key=a.key)
+        if not anomalies:
+            print(f"Integrity OK: {a.rounds} round(s) of keyed random-chunk Merkle verification passed.")
+        else:
+            for item in anomalies:
+                print(f"[TAMPER] round {item.get('round')}: {item.get('file')} ({item.get('status')}) chunk={item.get('chunk')} line={item.get('line')}")
+        return
+    if a.cmd == "verify-ledger":
+        from .integrity import verify_ledger
+        ok, msg, _ = verify_ledger(a.repo, signing_key=a.key)
+        print(msg)
+        return
     if a.cmd in ("run", "resume"):
         import sys
         from .agents.orchestrator import Orchestrator
@@ -50,7 +79,7 @@ def main():
         if a.cmd == "resume":
             return o.resume()
         approve = a.approve if a.approve in (None, "all", "low", "none") else a.approve.split(",")
-        return o.run(approve, interactive=approve is None and sys.stdin.isatty())
+        return o.run(approve, interactive=approve is None and not a.auto_merge and sys.stdin.isatty(), auto_merge=a.auto_merge)
     if a.cmd == "approve":
         import time
         f = Path(a.out) / "run_state.json"

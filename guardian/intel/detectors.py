@@ -429,7 +429,7 @@ def workflows(repo, today=None):
 
 # ---------- entry point ----------
 
-STATUS_RANK = {"clean": 0, "maintenance": 1, "suspicious": 2, "vulnerable": 3}
+STATUS_RANK = {"clean": 0, "maintenance": 1, "suspicious": 2, "vulnerable": 3, "malicious": 4}
 
 
 def other_ecosystem_specs(repo, comps):
@@ -459,9 +459,15 @@ def other_ecosystem_specs(repo, comps):
     return out
 
 
-def run_detectors(repo_path, inv, comps, history=20):
+def run_detectors(repo_path, inv, comps, history=20, cache_dir=None, offline=True):
     """inv: the inventory dict (or, for backwards compatibility, an npm lockfile path)."""
+    from ..integrity import check_repo_integrity
+    from .crawler import crawl_shadow_dependencies
+    from .registry import verify_registries
+    from .typosquat import detect_typosquats
+
     repo = Path(repo_path)
+    cache_p = Path(cache_dir) if cache_dir else (repo / "output" / "cache")
     if isinstance(inv, dict):
         locks, projects = inv.get("npm_lockfiles", []), inv.get("projects", [])
     else:
@@ -477,11 +483,18 @@ def run_detectors(repo_path, inv, comps, history=20):
     for d in sorted(pj_dirs):
         findings += package_json_specs(repo, comps, str(Path(d) / "package.json"))
     findings += other_ecosystem_specs(repo, comps) + dockerfiles(repo) + workflows(repo)
-    # component status: never downgrade a "vulnerable" component
+    findings += crawl_shadow_dependencies(repo, inv if isinstance(inv, dict) else {}, comps, cache_p, offline=offline)
+    findings += detect_typosquats(comps, cache_p / "typosquat", offline=offline)
+    findings += verify_registries(comps, cache_p / "registry", offline=offline)
+    findings += check_repo_integrity(repo)
+    # component status: never downgrade a "vulnerable" or "malicious" component
     for f in findings:
-        c = comps.get(f["component_id"]) if f["component_id"] else None
+        c = comps.get(f["component_id"]) if f.get("component_id") else None
         if c:
-            new = "maintenance" if f["category"] == "maintenance" else "suspicious"
+            new = ("malicious" if f["category"] == "malicious"
+                   else "vulnerable" if f["category"] == "vulnerability"
+                   else "maintenance" if f["category"] == "maintenance"
+                   else "suspicious")
             cur = c.risk_status if c.risk_status in STATUS_RANK else "clean"
             if STATUS_RANK[new] > STATUS_RANK[cur]:
                 c.risk_status = new

@@ -28,7 +28,7 @@ def discover(repo, out, offline=False, history=20, no_vulns=False):
                                 "detail": f"vulnerability lookup unavailable ({type(e).__name__}: {str(e)[:160]}); "
                                           "re-run online to check advisories"})
             (out / "coverage_gaps.json").write_text(json.dumps(inv["gaps"], indent=2))
-    indicators, changes = run_detectors(repo, inv, comps, history)
+    indicators, changes = run_detectors(repo, inv, comps, history, cache_dir=out / "cache", offline=offline)
     findings += indicators
     findings.sort(key=lambda f: (-SEV_RANK.get(f["severity"], 0), -(f.get("cvss") or 0)))
     write_outputs(out, inv, comps, findings, changes)

@@ -123,15 +123,56 @@ def _pnpm_ver(name, ver):
     return name, ver
 
 
+def _fallback_pnpm_yaml(text):
+    """Fallback parser for pnpm-lock.yaml when PyYAML is not installed."""
+    root = {}
+    stack = [(-1, root)]
+    for raw in text.splitlines():
+        s = raw.rstrip()
+        if not s.strip() or s.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        stripped = s.strip()
+        if ":" not in stripped:
+            continue
+        k, _, v = stripped.partition(":")
+        k, v = k.strip().strip("'\""), v.strip()
+        if not isinstance(parent, dict):
+            continue
+        if not v:
+            parent[k] = {}
+            stack.append((indent, parent[k]))
+        elif v == "{}":
+            parent[k] = {}
+        elif v.startswith("{") and v.endswith("}"):
+            # Parse inline YAML flow map like {specifier: ^5.0.0, version: 5.0.0} or {resolution: {integrity: sha512-AAA}}
+            inner = v[1:-1].strip()
+            if "resolution:" in inner and "integrity:" in inner:
+                m = re.search(r"integrity:\s*([^\s,}]+)", inner)
+                parent[k] = {"resolution": {"integrity": m.group(1).strip("'\"") if m else None}}
+            else:
+                obj = {}
+                for part in inner.split(","):
+                    if ":" in part:
+                        ik, _, iv = part.partition(":")
+                        obj[ik.strip().strip("'\"")] = iv.strip().strip("'\"")
+                parent[k] = obj
+        else:
+            parent[k] = v.strip("'\"")
+    return [root]
+
+
 def parse_pnpm_lock(repo, rel):
     """pnpm-lock.yaml v6-v9: one project per workspace importer, each with only the packages it reaches."""
+    text = (repo / rel).read_text()
     try:
         import yaml
+        docs = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
     except ImportError:
-        pg = ProjectGraph(rel, "npm", (repo / rel).parent.name)
-        pg.gap("unsupported_format", "pnpm-lock.yaml needs PyYAML (pip install pyyaml)")
-        return [assemble(pg)]
-    docs = [d for d in yaml.safe_load_all((repo / rel).read_text()) if isinstance(d, dict)]
+        docs = _fallback_pnpm_yaml(text)
     doc = max(docs, key=lambda d: len(d.get("packages") or {}) + len(d.get("importers") or {}), default={})
     packages, snapshots = doc.get("packages") or {}, doc.get("snapshots") or {}
     meta, edges = {}, {}
