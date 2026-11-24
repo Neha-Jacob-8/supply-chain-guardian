@@ -12,8 +12,9 @@
 <header class="top">
   <div class="brand"><span class="mark"></span>Supply Chain Guardian</div>
   <form id="runForm" class="runform" autocomplete="off">
-    <input id="target" type="text" spellcheck="false" placeholder="https://github.com/owner/repo" aria-label="GitHub repository URL">
+    <input id="target" type="text" spellcheck="false" placeholder="https://github.com/owner/repo or owner/repo" aria-label="GitHub repository URL">
     <select id="llm" aria-label="Agent mode"><option value="auto">Agents: auto</option><option value="groq">Agents: Groq</option><option value="gemini">Agents: Gemini</option><option value="claude">Agents: Claude</option><option value="none">Agents: rule-based</option></select>
+    <label class="tog" title="Autonomous mode: automatically generate/run tests in sandbox and auto-merge passing fixes"><input type="checkbox" id="autoMergeToggle"> Auto-Mitigate &amp; Merge</label>
     <button id="runBtn" class="btn primary" type="submit">Analyse</button>
   </form>
   <div class="status"><span id="modeChip" class="chip"></span><span id="repoName" class="mono muted"></span></div>
@@ -44,6 +45,9 @@
           <h3 class="mt">Projects</h3><table class="tbl" id="projects"></table></div>
         <div class="panel"><h3>Top priorities</h3><ol id="topPri" class="pri"></ol></div>
       </div>
+      <div class="panel"><h3>Cryptographic Integrity (Merkle Baseline &amp; Signed Ledger)</h3>
+        <div id="integrityBox" class="row2"><span class="muted">No repository loaded yet.</span></div>
+      </div>
       <div class="panel"><h3>What changed (lockfile history)</h3><div id="changes" class="timeline"></div></div>
     </section>
 
@@ -68,7 +72,7 @@
     <section class="view" id="v-matrix">
       <div class="toolbar">
         <input id="mQ" placeholder="Search packages…" spellcheck="false">
-        <select id="mStatus"><option value="">Any status</option><option>vulnerable</option><option>suspicious</option><option>maintenance</option><option>clean</option><option>not-scanned</option></select>
+        <select id="mStatus"><option value="">Any status</option><option>malicious</option><option>vulnerable</option><option>suspicious</option><option>maintenance</option><option>clean</option><option>not-scanned</option></select>
         <select id="mRel"><option value="">Direct + transitive</option><option>direct</option><option>transitive</option></select>
         <select id="mScope"><option value="">Prod + dev</option><option>prod</option><option>dev</option></select>
         <select id="mEco"><option value="">All ecosystems</option></select>
@@ -81,7 +85,7 @@
 
     <section class="view" id="v-findings">
       <div class="toolbar">
-        <select id="fCat"><option value="">All categories</option><option>vulnerability</option><option>suspicious</option><option>maintenance</option><option>container</option><option>ci</option></select>
+        <select id="fCat"><option value="">All categories</option><option>malicious</option><option>vulnerability</option><option>suspicious</option><option>maintenance</option><option>container</option><option>ci</option></select>
         <select id="fSev"><option value="">Any risk</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select>
         <input id="fQ" placeholder="Filter by package or rule…" spellcheck="false">
         <span id="fCount" class="muted"></span>

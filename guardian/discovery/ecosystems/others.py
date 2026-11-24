@@ -146,6 +146,43 @@ def parse_composer(repo, rel):
     return assemble(pg)
 
 
+def _apply_mvn_tree_text(pg, text):
+    """Parse `mvn dependency:tree` text output (3 chars indent per level) into direct and transitive edges."""
+    stack = []
+    added = 0
+    for ln in text.splitlines():
+        r = re.match(r"^(?:\[INFO\] )?([|+\\ -]*)([\w.\-]+(?::[\w.\-]+){3,5})\s*$", ln)
+        if not r or not r.group(1):
+            continue
+        p = r.group(2).split(":")
+        ver = p[-2] if len(p) in (5, 6) else p[-1]
+        scope_str = p[-1] if len(p) in (5, 6) else "compile"
+        scope = "dev" if scope_str in ("test", "provided") else "prod"
+        cid = pg.add(f"{p[0]}:{p[1]}", ver, resolution="locked")
+        added += 1
+        lvl = len(r.group(1)) // 3
+        stack = stack[:max(0, lvl - 1)]
+        if lvl == 1:
+            pg.direct[cid] = scope
+        elif stack:
+            pg.edges.append((stack[-1], cid))
+            if scope == "dev":
+                pg.hints.setdefault(cid, {})["scope"] = "dev"
+        stack.append(cid)
+    return added
+
+
+def parse_mvn_tree(repo, rel):
+    path = repo / rel
+    text = path.read_text(errors="replace")
+    root_m = re.search(r"^(?:\[INFO\] )?([\w.\-]+:[\w.\-]+):(?:jar|war|pom|ear|bundle):([\w.\-]+)\s*$", text, re.M)
+    name = root_m.group(1) if root_m else path.parent.name
+    ver = root_m.group(2) if root_m else ""
+    pg = ProjectGraph(rel, "maven", name, ver)
+    _apply_mvn_tree_text(pg, text)
+    return assemble(pg)
+
+
 def parse_pom(repo, rel):
     path = repo / rel
     try:
@@ -172,9 +209,17 @@ def parse_pom(repo, rel):
         unresolved += 0 if ok else 1
         cid = pg.add(f"{g}:{a}", v if ok else "", resolution="locked" if ok else "declared-only")
         pg.direct[cid] = "dev" if txt(d, "scope") in ("test", "provided") else "prod"
-    pg.gap("unresolved_dependency", "Maven transitive dependencies need `mvn dependency:tree`; only declared "
-                                    "dependencies are listed") if pg.packages else None
-    if unresolved:
+    tree_used = False
+    for cand_name in ("mvn-tree.txt", "dependency-tree.txt", "mvn_dependency_tree.txt", ".mvn-tree"):
+        cand = path.parent / cand_name
+        if cand.is_file():
+            if _apply_mvn_tree_text(pg, cand.read_text(errors="replace")) > 0:
+                tree_used = True
+                break
+    if pg.packages and not tree_used:
+        pg.gap("unresolved_dependency", "Maven transitive dependencies need `mvn dependency:tree`; only declared "
+                                        "dependencies are listed")
+    if unresolved and not tree_used:
         pg.gap("unresolved_dependency", f"{unresolved} dependency version(s) come from a parent POM or BOM and are unknown")
     return assemble(pg)
 

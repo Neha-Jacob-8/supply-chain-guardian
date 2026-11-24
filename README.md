@@ -1,140 +1,126 @@
 # Software Supply Chain Guardian
 
-An agentic AI system that takes any public GitHub repository from **discovery** to **independently validated
-remediation**: it maps the full dependency network, finds known vulnerabilities and suspicious supply-chain changes,
-lets AI agents investigate and prioritise them, proposes fixes for human approval, and verifies each approved fix in
-a sandbox before reporting.
+An agentic AI security platform that takes any repository (`owner/repo`, GitHub URL, or local checkout) from **discovery** and **cryptographic integrity verification** to **autonomous test generation, sandbox validation, and remediation**.
 
 ![Architecture](docs/architecture.svg)
 
-**Principle:** evidence comes from deterministic tools; AI agents interpret it. Scores and verdicts are computed, never
-generated. Every fix needs human approval and independent validation.
+---
 
-## Quick start
+## Visual Architecture & End-to-End Dataflow
+
+```mermaid
+flowchart LR
+  subgraph IN["1. Target & Multi-Eco Ingestion"]
+    GH["GitHub / Local Repo<br/>(owner/repo shorthand)"] --> CLONE["Safe Clone<br/>(hooks off, depth=50)"]
+    CLONE --> PARSE["9 Ecosystem Parsers<br/>npm/pnpm/yarn · PyPI/uv/Poetry<br/>Cargo · Maven + mvn-tree · Go<br/>Ruby · Composer · ROS · Git"]
+    CLONE --> CRAWL["Parallel Shadow Crawler<br/>(.py .js .ts .rs .java .go .rb)<br/>+ Dynamic top_level.txt"]
+  end
+
+  subgraph INT["2. Cryptographic Integrity"]
+    CLONE --> MERKLE["4096B Chunk Merkle Tree<br/>(.guardian/baseline.json)"]
+    MERKLE --> LEDGER["HMAC Hash-Chained Ledger<br/>(.guardian/ledger.jsonl)"]
+  end
+
+  subgraph DET["3. Live Intel & Anomaly Detectors"]
+    PARSE --> GRAPH["Unified PURL Graph<br/>CycloneDX 1.5 SBOM + Matrix"]
+    CRAWL --> SC8["Shadow & Phantom Deps (SC8)"]
+    GRAPH --> OSV["OSV.dev Batch API<br/>CVE (CVSS v3/v4) vs MAL-*"]
+    GRAPH --> REG["Multi-Registry Diffing<br/>npm · PyPI · Maven Central<br/>404 (SC10) & <7d Age (SC11)"]
+    GRAPH --> TYPO["API Typosquat Detector (SC9)<br/>deps.dev + Registry Search"]
+    GRAPH --> LOCK["Git History & CI/Container<br/>SC1-SC7 · CT1-CT5 · CI1-CI4"]
+  end
+
+  subgraph AG["4. Multi-Agent Reasoning & Scoring"]
+    OSV & REG & TYPO & SC8 & LOCK & MERKLE --> RISK["Deterministic Risk Formula<br/>+ CISA KEV + FIRST EPSS"]
+    RISK --> RED["Attack Agent (Red Team)"]
+    RISK --> INTAG["Integrity Agent (IT1/IT2)"]
+    RED & INTAG --> RANALYST["Risk Analysis Agent"]
+    RANALYST --> BLUE["Defense Agent (Blue Team)"]
+  end
+
+  subgraph VAL["5. Human Gate / Auto-Mitigate & Sandbox"]
+    BLUE --> GATE{"Human Approval<br/>or Auto-Mitigate"}
+    GATE -->|Autonomous / Approved| TESTGEN["LLM Smoke Test Generator<br/>(GEMINI_API_FOR_TESTING)"]
+    TESTGEN --> SANDBOX["Isolated Sandbox / Docker<br/>Patch + Lockfile Regen + Tests"]
+    SANDBOX --> MERGE["Auto-Merge + Re-Sign<br/>Merkle Baseline & Ledger"]
+  end
+```
+
+---
+
+## Mathematical Equations & Scoring Formulas
+
+### 1. Deterministic Vulnerability Risk Score ($0\text{–}100$)
+
+$$\text{Risk}_{\text{vuln}} = \min\!\Big(100,\; \text{round}\big(S_{\text{cvss}} + E_{\text{exploit}} + X_{\text{scope}} + R_{\text{reach}} + D_{\text{direct}}\big)\Big)$$
+
+| Factor | Equation / Value | Source |
+|---|---|---|
+| **Severity ($S_{\text{cvss}}$)** | $40 \times \frac{\text{CVSS}_{\text{v3/v4}}}{10}$ | OSV.dev advisory vector (`CVSS:3.1` or `CVSS:4.0`), or `10.0` for `MAL-*` |
+| **Exploitability ($E_{\text{exploit}}$)** | $25 \text{ if } \text{CVE} \in \text{CISA KEV}, \text{ else } 15 \times P_{\text{EPSS}}$ | CISA Known Exploited Vulnerabilities & FIRST EPSS API |
+| **Exposure ($X_{\text{scope}}$)** | $15 \text{ (prod)} \;\mid\; 3 \text{ (dev)}$ | Dual-pass BFS production path reachability |
+| **Reachability ($R_{\text{reach}}$)** | $15 \text{ (direct import)} \;\mid\; 8 \text{ (transitive under imported)} \;\mid\; 0$ | Parallel source-code AST/regex crawler + `top_level.txt` |
+| **Directness ($D_{\text{direct}}$)** | $5 \text{ (direct)} \;\mid\; 0 \text{ (transitive)}$ | Project manifest graph distance ($d = 1$) |
+
+### 2. CVSS v3.x & CVSS v4.0 Base Score Equations
+
+$$\text{ISS} = 1 - (1 - I_C)(1 - I_I)(1 - I_A), \qquad \text{Exploitability}_{\text{v3}} = 8.22 \times AV \times AC \times PR \times UI$$
+
+$$\text{CVSS}_{\text{v3}} = \begin{cases} 0 & \text{if } \text{Impact} \le 0 \\ \text{RoundUp}\!\big(\min(1.08 \times (\text{Impact} + \text{Exploitability}),\; 10.0)\big) & \text{if Scope Changed} \\ \text{RoundUp}\!\big(\min(\text{Impact} + \text{Exploitability},\; 10.0)\big) & \text{if Scope Unchanged} \end{cases}$$
+
+$$\text{CVSS}_{\text{v4}} = \text{ clamp}_{[0.1, 10.0]}\!\Big(\text{MacroVectorBase}(EQ_1, EQ_2, EQ_3, EQ_4) - \sum_{m \in \{AV,AC,AT,PR,UI,VA\}} w_m \cdot \Delta_m\Big)$$
+
+### 3. Cryptographic 4096-Byte Merkle Tree & Hash-Chained Audit Ledger
+
+$$\text{ChunkHash}_i = \text{SHA256}\big(\text{file}[4096i : 4096(i+1)]\big), \qquad H_{k}^{(l+1)} = \text{SHA256}\big(H_{2k}^{(l)} \;\|\; H_{2k+1}^{(l)}\big)$$
+
+$$\text{PickIndex}(r, f, c) = \text{int}_{64}\!\Big(\text{HMAC-SHA256}\big(K_{\text{sign}},\; \text{nonce}_r \;\|\; f \;\|\; c\big)\Big) \bmod N_{\text{chunks}}$$
+
+$$R_n = \text{SHA256}\big(n \;\|\; R_{n-1} \;\|\; \text{ CanonicalJSON}(\text{event}_n)\big), \qquad \sigma_n = \text{HMAC-SHA256}\big(K_{\text{sign}},\; R_n\big)$$
+
+---
+
+## Intelligence Sources, Tech Stack & Open Tools
+
+| Category | Tools / APIs / Standards Used | Purpose |
+|---|---|---|
+| **AI & Agent SDKs** | **Official Google GenAI SDK (`google-genai` / `google.genai`)**, **Groq API (`GROQ_API_KEYS`)**, **Anthropic SDK (`anthropic`)** | Multi-key/model rotation for Attack, Integrity, Risk, Defense agents + dedicated `GEMINI_API_FOR_TESTING` smoke-test generator |
+| **Vulnerability & Exploit Feeds** | **OSV.dev API** (`/v1/querybatch`), **CISA KEV** JSON feed, **FIRST EPSS** API (`/data/v1/epss`), **GitHub Security Advisories (`GHSA-*`)**, **OpenSSF Malicious Packages (`MAL-*`)** | Live CVE/GHSA lookup, malicious package separation, active exploitation & 30-day probability scoring |
+| **Package Registries & Insights** | **Google Open Source Insights (`api.deps.dev`)**, **npm Registry** (`registry.npmjs.org`), **PyPI JSON API** (`pypi.org/pypi/<pkg>/json`), **Maven Central Solr** (`search.maven.org`), **Crates.io**, **RubyGems**, **Packagist** | Multi-ecosystem typosquat detection (`SC9`), `404` unknown provenance (`SC10`), release-age `< 7d` diffing (`SC11`), tarball integrity verification |
+| **SBOM & Package Standards** | **CycloneDX 1.5 JSON** (`sbom.cdx.json`), **Package URL (`purl`)**, **CVSS v3.1 & v4.0**, **Subresource Integrity (SRI)** | Canonical component identification and machine-readable supply chain export |
+| **Backend, Sandbox & Web Stack** | **Python 3.11+**, **FastAPI**, **Uvicorn**, **Docker / Docker Compose v2**, **Git CLI**, **Force-Graph (HTML5 Canvas)** | REST API, isolated container lockfile regeneration & smoke testing, interactive force-directed dependency network UI |
+
+---
+
+## Quick Start
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
-cp .env.example .env          # add GROQ_API_KEYS, GEMINI_API_KEYS, and/or ANTHROPIC_API_KEY
+cp .env.example .env          # set GROQ_API_KEYS, GEMINI_API_KEYS, GEMINI_API_FOR_TESTING, GUARDIAN_SIGNING_KEY
 guardian serve                # open http://127.0.0.1:8000, paste a GitHub URL, press Analyse
 ```
 
-Command line:
+### Command Line & Live Simulation
 
 ```bash
-guardian scan https://github.com/OWASP/NodeGoat      # inventory, SBOM, matrix, vulnerabilities, indicators
-guardian run  https://github.com/OWASP/NodeGoat      # full agentic pipeline; pauses at the approval gate
-guardian approve --ids FIX-...,FIX-...               # human decision (or --ids low | all, --reject)
-guardian resume targets/NodeGoat                     # independent validation + report
+# Scan or run full pipeline (accepts owner/repo shorthand, full GitHub URL, or local path)
+guardian scan OWASP/NodeGoat
+guardian run  OWASP/NodeGoat --auto-merge
+
+# Cryptographic Merkle baseline, random-chunk watch, ledger verification & human warning waiver
+guardian baseline targets/live-demo --signer "lead-dev"
+guardian watch    targets/live-demo --rounds 3
+guardian verify-ledger targets/live-demo
+guardian waive    targets/live-demo <finding_id> "Reviewed and accepted by security team"
+
+# Simulate live attacks in a second terminal while watching the Web UI
+python3 scripts/simulate_attacks.py targets/live-demo all
 ```
 
-Options: `--llm auto|groq|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static
-validation remains partial),
-`--history N` (lockfile commits to compare).
+Options: `--llm auto|groq|gemini|claude|none`, `--auto-merge`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static validation remains partial), `--history N` (lockfile commits to compare).
 
-## What it does
-
-| Stage | Who | Output |
-|---|---|---|
-| Ingestion | code | safe clone (github.com only, hooks off, no submodules), repository files only (`git ls-files`) |
-| 1 Discovery & detection | deterministic tools | dependency network across 9 ecosystems, CycloneDX SBOM, Dependency Matrix, OSV vulnerabilities, non-CVE indicators, risk scores, fix candidates, coverage gaps |
-| 2 Attack agent (Red Team) | LLM + read-only tools | investigations of suspicious indicators with attack paths, verified facts vs inference |
-| 3 Risk analysis agent | LLM + read-only tools | ranked priorities with rationale (scores stay formula-based) |
-| 4 Defense agent (Blue Team) | LLM + read-only tools | fix proposals chosen from computed candidates; patch-less fixes escalate to a human |
-| Approval gate | human | approve / reject each fix (dashboard or CLI) |
-| 5 Validation agent | deterministic | patch a copy, regenerate lockfile safely, rescan, run only a trusted profile's tests/smoke checks → verified / partial / failed |
-| Apply | code | approved fixes that passed validation (verified, or static-only with a clean rescan) are written to a local branch `guardian/remediation-<time>`, one commit per fix (never pushed); `remediation.patch` |
-| Report | code | `report.md` + `report.json`, audit trail in `events.jsonl` |
-
-Details: [docs/requirements.md](docs/requirements.md) · [docs/implementation.md](docs/implementation.md) ·
-flowcharts: [docs/architecture.md](docs/architecture.md) · [operations runbook](docs/operations.md) ·
-[presentation runbook](docs/presentation.md) · [Responsible AI & security note](docs/responsible-ai.md) ·
-[demo script](docs/demo.md)
-
-## Supported ecosystems
-
-| Ecosystem | Files | Graph |
-|---|---|---|
-| npm | `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (workspaces), `yarn.lock` v1, `package.json` | full (declared only without a lockfile) |
-| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (pip-compile `# via` → edges), `pyproject.toml` | full / flat / declared |
-| Go | `go.mod` | direct + indirect |
-| Rust | `Cargo.lock` (+ `Cargo.toml` dev deps) | full |
-| Ruby | `Gemfile.lock` | full |
-| PHP | `composer.lock`, `composer.json` | full / declared |
-| Java | `pom.xml` | declared |
-| ROS | `package.xml` | declared rosdep keys |
-| Git | `.repos` (vcstool), `.gitmodules` | declared |
-
-Monorepos become one network with a node per project. Anything unresolved (ranges, missing lockfiles, Gradle,
-C/C++ build files) is listed as a coverage gap rather than guessed. Tested on 20 public repositories across all of
-the above, including pnpm monorepos, an empty repository and offline runs.
-
-## LLM providers
-
-Configured in `.env` (git-ignored). `GROQ_API_KEYS=k1,k2,k3,k4` are tried in order; rate-limit/auth failures rotate
-to the next key and then the next configured model. Set `GUARDIAN_GROQ_MODELS` to override the default Groq model order.
-`GEMINI_API_KEYS=k1,k2,k3` are also tried in order; per key, models are tried in order
-(`gemini-3.5-flash` → `gemini-flash-latest` → lite models, override with `GUARDIAN_GEMINI_MODELS`). Invalid keys are
-dropped, retired models skipped, quota errors move to the next model/key, overload is retried. If every key and
-model fails, the agent restarts on the next provider (Claude, if `ANTHROPIC_API_KEY` is set) and finally runs its
-labelled rule-based fallback, so the pipeline always completes. Keys are sent only as request headers and never logged.
-
-## Outputs (`output/`)
-
-| File | Contents |
-|---|---|
-| `matrix.csv` / `matrix.json` | Dependency Matrix: purl, ecosystem, direct/transitive, prod/dev, parent, full path, source, license, advisories, CVSS, severity, affected range, fixed version, risk status |
-| `sbom.cdx.json` | CycloneDX 1.5 SBOM with hashes, sources and the dependency tree |
-| `graph.json` | network nodes (repo, projects, packages) and edges |
-| `findings.json` | vulnerabilities (verified, OSV) and indicators (rule-based), each with evidence and a risk breakdown |
-| `run_state.json`, `events.jsonl`, `evidence/` | agent outputs, approvals, verdicts, applied fixes; audit trail; cited evidence |
-| `remediation.patch` | the applied fixes as `git format-patch` output, ready for a pull request |
-| `report.md` / `report.json` | Guardian Security Report |
-
-## Repository layout
-
-```
-guardian/
-  cli.py, api.py, config.py      CLI, REST API (FastAPI), .env loading
-  ingestion.py                   GitHub URL validation and safe clone
-  pipeline.py                    discovery + detection pipeline
-  discovery/                     ecosystem parsers, network assembly, SBOM, matrix
-  intel/                         OSV, detectors, risk scoring, registry lookups
-  remediation/                   deterministic fix candidates
-  agents/                        orchestrator, agent loop + guardrails, tools, state, Gemini/Claude backends, 3 agents
-  agents/prompts/                agent system prompts (package data)
-  validation/                    Docker sandbox validation
-  reporting/                     report generator
-  policies/                      risk weights, end-of-life dates, smoke profiles (editable data)
-  web/                           dashboard (HTML/CSS/JS, served by `guardian serve`)
-scripts/seed_demo.py             local lockfile-tamper demo branch
-tests/                           54 unit tests (no network, no API key; optional SDK shape test uses anthropic)
-docs/                            requirements, architecture, implementation, operations, presentation, responsible AI, demo
-```
-
-## Tests
-
-```bash
-uv run --with pyyaml --with fastapi --with uvicorn --with anthropic python -m unittest discover -s tests -t .
-```
-
-CI runs them on every push (GitHub Actions, SHA-pinned, read-only token).
-
-## Safety
-
-Only public `github.com` repositories are cloned, with git hooks disabled and no credential prompts. Target code
-never runs on the host: lockfile regeneration uses `--ignore-scripts` and runs in Docker as a non-root user.
-Unknown repositories never execute arbitrary Dockerfiles/Compose; runtime checks require an allowlisted remote
-identity and pass a host-escape policy first. Repository secrets are redacted before anything reaches an LLM.
-A fix reaches the repository only after human
-approval and a passing validation, and then only as a local branch commit (git hooks disabled); nothing is merged,
-pushed or deployed automatically.
-
-## Known limitations
-
-- Reachability is package-level (is the package imported), not function-level.
-- Automatic patches cover npm and pinned Python requirements; other ecosystems get exact manual instructions.
-- Lockfile history ("what changed") is analysed for npm lockfiles.
-- Runtime validation uses a trusted smoke profile when one exists (`policies/smoke_profiles.json`); unknown or
-  untrusted repositories receive a static rescan and an explicit `partial` verdict.
-- Indicators are heuristics, not proof of compromise; the end-of-life table is a static snapshot.
+### Visual Slide Deck & Documentation
+- **[Visual Presentation Deck (PPT-Style Diagrams & Equations)](docs/presentation.md)**
+- **[System Architecture & Dataflow Charts](docs/architecture.md)**
+- **[Requirements](docs/requirements.md)** · **[Implementation](docs/implementation.md)** · **[Operations](docs/operations.md)** · **[Responsible AI](docs/responsible-ai.md)** · **[Demo Script](docs/demo.md)**

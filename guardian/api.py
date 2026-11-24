@@ -24,10 +24,11 @@ WEB = Path(__file__).parent / "web"
 
 
 class RunRequest(BaseModel):
-    target: str                       # local path or https://github.com/<owner>/<repo>
-    llm: str = "auto"                 # auto | claude | none
+    target: str                       # local path, owner/repo, or https://github.com/<owner>/<repo>
+    llm: str = "auto"                 # auto | gemini | claude | none
     offline: bool = False
     smoke: bool = True
+    auto_merge: bool = False
 
 
 class ResumeRequest(BaseModel):
@@ -39,6 +40,23 @@ class ResumeRequest(BaseModel):
 class ApprovalRequest(BaseModel):
     decision: str                     # approve | reject
     comment: str = ""
+
+
+class AutoMitigateRequest(BaseModel):
+    llm: str = "auto"
+    auto_merge: bool = True
+    save_test: bool = False
+
+
+class BaselineSignRequest(BaseModel):
+    key: str | None = None
+    signer: str = "developer (dashboard)"
+
+
+class WaiveFindingRequest(BaseModel):
+    reason: str = "Verified safe / accepted risk by human reviewer"
+    action: str = "waive"             # waive | unwaive
+    by: str = "human reviewer (dashboard)"
 
 
 def create_app(out_dir="output"):
@@ -93,19 +111,21 @@ def create_app(out_dir="output"):
         from .agents.orchestrator import Orchestrator
         from .ingestion import parse_github_url, resolve_target
         target = req.target.strip()
-        if target.startswith(("http://", "https://", "git@", "ssh://", "file://")):
+        if not Path(target).is_dir():
             try:
                 parse_github_url(target)           # validate now; clone in the background job
             except ValueError as e:
                 raise HTTPException(400, str(e))
-        elif not Path(target).is_dir():
-            raise HTTPException(400, f"{target} is neither a directory nor a GitHub URL")
 
         def job_fn():
             job["phase"] = "cloning"
             repo = str(resolve_target(target))
             job["repo"], job["phase"] = repo, "running"
-            Orchestrator(repo, out, req.llm, req.offline, smoke=req.smoke).run(approve=None, interactive=False)
+            Orchestrator(repo, out, req.llm, req.offline, smoke=req.smoke).run(
+                approve="all" if req.auto_merge else None,
+                interactive=False,
+                auto_merge=req.auto_merge,
+            )
         job["repo"] = target
         return start("run", job_fn) | {"target": target}
 
@@ -142,6 +162,103 @@ def create_app(out_dir="output"):
             ev.write(json.dumps({"t": time.time(), "stage": "awaiting_approval", "actor": "human", "kind": "approval",
                                  "detail": {"candidate_id": candidate_id, "status": st["approvals"][candidate_id]["status"]}}) + "\n")
         return st["approvals"][candidate_id]
+
+    @app.post("/api/auto-mitigate")
+    def auto_mitigate_all(req: AutoMitigateRequest):
+        if running():
+            raise HTTPException(409, "wait for the current job to finish")
+        from .agents.orchestrator import Orchestrator
+        st = load("run_state.json")
+        repo = st.get("repo")
+        if not repo or not Path(repo).is_dir():
+            raise HTTPException(400, "no active repository run")
+
+        def job_fn():
+            job["repo"], job["phase"] = repo, "auto-mitigating"
+            o = Orchestrator(repo, out, req.llm, offline=bool((st.get("run_config") or {}).get("offline")))
+            o.run(approve="all", interactive=False, auto_merge=req.auto_merge)
+        return start("auto-mitigate", job_fn)
+
+    @app.post("/api/proposals/{candidate_id}/auto-mitigate")
+    def auto_mitigate(candidate_id: str, req: AutoMitigateRequest):
+        if running():
+            raise HTTPException(409, "wait for the current job to finish")
+        from .agents.llm import get_llm
+        from .agents.state import RunState
+        from .models import Component
+        from .validation.auto_mitigate import auto_mitigate_candidate
+
+        st_data = load("run_state.json")
+        files_map = load("candidates_files.json", {})
+        cand = next((c for c in st_data.get("candidates", []) if c["candidate_id"] == candidate_id), None)
+        if cand is None:
+            raise HTTPException(404, "unknown candidate")
+        cand = dict(cand)
+        # Reconstruct (old, new) tuples for candidate files
+        repo_p = Path(st_data["repo"])
+        c_files = {}
+        for rel_p, new_txt in (files_map.get(candidate_id) or {}).items():
+            old_txt = (repo_p / rel_p).read_text(encoding="utf-8") if (repo_p / rel_p).exists() else ""
+            c_files[rel_p] = (old_txt, new_txt)
+        cand["files"] = c_files
+
+        state_obj = RunState(repo_p, out)
+        for c_dict in load("components.json", []):
+            state_obj.comps[c_dict["component_id"]] = Component(**c_dict)
+        try:
+            llm_inst = get_llm(req.llm)
+        except Exception:
+            llm_inst = None
+
+        res = auto_mitigate_candidate(state_obj, cand, llm=llm_inst, auto_merge=req.auto_merge, save_generated_test=req.save_test)
+        st_data["approvals"][candidate_id] = {
+            "status": "approved",
+            "by": "auto-mitigate (dashboard)",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "repo_identity": st_data.get("identity"),
+            "diff_sha256": cand.get("diff_sha256"),
+        }
+        st_data["validations"] = [v for v in st_data.get("validations", []) if v["candidate_id"] != candidate_id] + [res]
+        (out / "run_state.json").write_text(json.dumps(st_data, indent=2, default=str))
+        return res
+
+    @app.get("/api/integrity")
+    def integrity_status():
+        from .integrity import run_watch, verify_ledger
+        st = load("run_state.json", {})
+        repo = st.get("repo")
+        if not repo or not Path(repo).is_dir():
+            return {"has_baseline": False, "has_ledger": False}
+        repo_p = Path(repo)
+        has_base = (repo_p / ".guardian" / "baseline.json").exists()
+        has_led = (repo_p / ".guardian" / "ledger.jsonl").exists()
+        anomalies = []
+        if has_base:
+            try:
+                anomalies = run_watch(repo_p, interval=0, rounds=1, full_check_every=1)
+            except Exception as e:
+                anomalies = [{"status": "error", "detail": str(e)}]
+        led_ok, led_msg, led_info = verify_ledger(repo_p) if has_led else (True, "No ledger yet", None)
+        return {
+            "repo": str(repo_p),
+            "has_baseline": has_base,
+            "baseline_ok": has_base and len(anomalies) == 0,
+            "anomalies": anomalies,
+            "has_ledger": has_led,
+            "ledger_ok": led_ok,
+            "ledger_message": led_msg,
+            "ledger_detail": led_info,
+        }
+
+    @app.post("/api/integrity/baseline")
+    def sign_baseline(req: BaselineSignRequest):
+        from .integrity import create_baseline
+        st = load("run_state.json", {})
+        repo = st.get("repo")
+        if not repo or not Path(repo).is_dir():
+            raise HTTPException(400, "No active repository to baseline")
+        doc = create_baseline(repo, signing_key=req.key, signer=req.signer)
+        return {"ok": True, "files": len(doc.get("files", {})), "hmac": doc.get("hmac"), "created_at": doc.get("created_at")}
 
     # ---------- reads ----------
 
@@ -196,6 +313,31 @@ def create_app(out_dir="output"):
             if f["finding_id"] == finding_id:
                 return f
         raise HTTPException(404, "unknown finding")
+
+    @app.post("/api/findings/{finding_id:path}/waive")
+    def waive(finding_id: str, req: WaiveFindingRequest):
+        from .integrity import unwaive_finding, waive_finding
+        st = load("run_state.json", {})
+        repo = st.get("repo") or load("inventory.json", {}).get("repo")
+        if not repo or not Path(repo).is_dir():
+            raise HTTPException(400, "No active repository")
+        fs = load("findings.json")
+        target = next((f for f in fs if f["finding_id"] == finding_id), None)
+        if target is None:
+            raise HTTPException(404, "unknown finding")
+        if req.action == "unwaive":
+            unwaive_finding(repo, finding_id, by=req.by)
+            target.pop("waived", None)
+            target.pop("waiver", None)
+        else:
+            w = waive_finding(repo, finding_id, reason=req.reason, by=req.by)
+            target["waived"] = True
+            target["waiver"] = w
+        (out / "findings.json").write_text(json.dumps(fs, indent=2))
+        with open(out / "events.jsonl", "a") as ev:
+            ev.write(json.dumps({"t": time.time(), "stage": st.get("stage", "done"), "actor": "human",
+                                 "kind": "waive_finding", "detail": {"finding_id": finding_id, "action": req.action, "reason": req.reason}}) + "\n")
+        return target
 
     @app.get("/api/coverage")
     def coverage():

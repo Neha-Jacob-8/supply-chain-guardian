@@ -26,6 +26,7 @@ PARSERS = [
     (lambda n: n == "Gemfile.lock", others.parse_gemfile_lock, ()),
     (lambda n: n == "composer.lock", others.parse_composer, ()),
     (lambda n: n == "composer.json", others.parse_composer, ("composer.lock",)),
+    (lambda n: n in ("mvn-tree.txt", "dependency-tree.txt", "mvn_dependency_tree.txt", ".mvn-tree"), others.parse_mvn_tree, ("pom.xml",)),
     (lambda n: n == "pom.xml", others.parse_pom, ()),
     (lambda n: n == "package.xml", others.parse_ros_package, ()),
     (lambda n: n.endswith(".repos"), others.parse_repos_file, ()),

@@ -1,127 +1,170 @@
-# Presentation runbook for tomorrow
+# Supply Chain Guardian — Visual Presentation Deck
 
-## One-sentence pitch
+![Architecture](architecture.svg)
 
-Supply Chain Guardian is an evidence-first multi-agent security team: deterministic discovery builds the SBOM and
-dependency graph, Red/Risk/Blue agents investigate and prioritize in application context, a human approves a
-bounded diff, and an independent validator rescans and tests it before reporting what remains.
+---
 
-## What to prepare before the room
+## Slide 1: End-to-End Architecture & Dataflow
 
-1. Install the project and verify Docker.
-2. Run one online scan to warm OSV/registry/EPSS/KEV caches.
-3. Run the deterministic demo once with `--llm none`; keep the generated output directory as a fallback.
-4. If Docker is available, approve one low-risk proposal in a disposable output directory and capture its validation
-   comparison. If Docker is unavailable, present the recorded static-only `partial` behavior honestly; do not call
-   it verified.
-5. Start the dashboard locally and keep the terminal visible for stage transitions.
+```mermaid
+flowchart LR
+  INPUT(["Target Input<br/>owner/repo · GitHub URL · Local"]) --> CLONE["Safe Git Ingestion<br/>Hooks Off · Depth 50"]
+  CLONE --> PARSERS["9-Ecosystem Graph Engine<br/>npm · PyPI · Cargo · Maven+Tree<br/>Go · Ruby · PHP · ROS · Git"]
+  CLONE --> CRAWLER["Parallel Shadow Crawler<br/>.py .js .ts .rs .java .go .rb"]
+  CLONE --> MERKLE["4096B Chunk Merkle Tree<br/>+ HMAC Audit Ledger"]
 
-Suggested preparation:
+  PARSERS & CRAWLER --> INTEL["Live Threat & Registry Feeds<br/>OSV.dev · CISA KEV · FIRST EPSS<br/>deps.dev · npm · PyPI · Maven"]
+  INTEL & MERKLE --> FORMULA["Deterministic Risk Engine<br/>CVSS v3/v4 + Reachability + KEV"]
 
-```bash
-pip install -e ".[all]"
-guardian run https://github.com/OWASP/NodeGoat --out demo-output --llm none --approve none
-guardian serve --out demo-output --host 127.0.0.1 --port 8000
+  FORMULA --> AGENTS["4 Specialist AI Agents<br/>Google GenAI SDK + Claude SDK<br/>Red · Integrity · Risk · Blue"]
+  AGENTS --> GATE{"Human Gate OR<br/>Autonomous Mode"}
+  GATE --> TESTGEN["Sandbox Test Generator<br/>GEMINI_API_FOR_TESTING"]
+  TESTGEN --> DOCKER["Isolated Sandbox Validation<br/>Patch + Test + Auto-Merge"]
 ```
 
-For a controlled history demonstration, use the local-only tamper seeder in a disposable clone:
+---
 
-```bash
-python3 scripts/seed_demo.py targets/NodeGoat
-guardian run targets/NodeGoat --out demo-tamper-output --llm none --approve none --no-smoke
+## Slide 2: Multi-Ecosystem Graph & Parallel Shadow Crawler
+
+```mermaid
+flowchart TD
+  REPO["Repository Files (git ls-files)"] --> MAN["Declared Manifests & Lockfiles"]
+  REPO --> SRC["Source Code Files (ThreadPoolExecutor)"]
+
+  MAN --> M1["npm / pnpm / yarn"]
+  MAN --> M2["PyPI / Poetry / uv / Pipfile"]
+  MAN --> M3["Maven pom.xml + mvn dependency:tree"]
+  MAN --> M4["Cargo · Go · Ruby · Composer · ROS"]
+
+  SRC --> S1["Python AST/Imports + Dynamic top_level.txt"]
+  SRC --> S2["JS/TS require & ES import"]
+  SRC --> S3["Rust use/extern crate · Java import · Go · Ruby"]
+
+  M1 & M2 & M3 & M4 --> DIFF{"Import Declared<br/>in Direct Graph?"}
+  S1 & S2 & S3 --> DIFF
+
+  DIFF -->|Yes| REACH["+15 Direct / +8 Transitive<br/>Reachability Score"]
+  DIFF -->|No: Transitive Only| PHANTOM["SC8: Phantom Dependency"]
+  DIFF -->|No: Missing Everywhere| SHADOW["SC8: Undeclared Shadow Dependency"]
+
+  PHANTOM & SHADOW --> OSVCHK{"OSV.dev Check<br/>CVE or MAL-*?"}
+  OSVCHK -->|MAL-* / CVE| CRIT["CRITICAL / HIGH Alert<br/>Block & Escalate"]
+  OSVCHK -->|Clean| PIN["FIX-SHDW-* Auto-Patch<br/>Pin in requirements.txt / package.json / Cargo.toml / pom.xml"]
 ```
 
-The seeder creates a local branch only, uses a reserved `.example` mirror URL, and never publishes anything. Reset
-the clone afterward with `git -C targets/NodeGoat checkout <original-branch>` and remove the demo branch only when
-you are certain it contains no user work.
+---
 
-## Seven-minute live flow
+## Slide 3: Cryptographic 4096B Merkle Tree & Signed Audit Ledger
 
-### 1. Frame the problem (45 seconds)
+```mermaid
+flowchart LR
+  subgraph DEV["Legitimate Developer Workflow"]
+    EDIT["Code Edit"] --> SIGN["Sign Baseline<br/>GUARDIAN_SIGNING_KEY"]
+    SIGN --> CHUNKS["Split into 4096-Byte Chunks<br/>c_0, c_1, ..., c_n"]
+    CHUNKS --> ROOT["Per-File SHA-256 Merkle Root<br/>+ Line Hashes"]
+    ROOT --> HMAC["HMAC-SHA256 Signed<br/>.guardian/baseline.json"]
+  end
 
-Say: “A CVE list is not a decision. We need to know whether the component is direct or transitive, production or
-development, reachable in application code, introduced by a suspicious change, and whether a proposed fix actually
-works.” Point to the four-stage story: discover → reason → approve → validate.
+  subgraph ATK["Silent Tamper / Rebase Attack"]
+    MAL["Malicious Script / Rebase<br/>Modifies 1 Line (e.g. Payment URL)"] --> WATCH["Keyed Random-Chunk Sampler<br/>HMAC(K, nonce || file || i)"]
+    HMAC --> WATCH
+    WATCH --> PINPOINT["IT1: Exact Chunk, Byte Offset<br/>& Line Number Pinpointed"]
+    PINPOINT --> IAGENT["Integrity Agent<br/>Reads Tampered Lines & Alerts"]
+  end
 
-### 2. Show the architecture (45 seconds)
+  subgraph LED["Tamper-Evident Hash-Chained Ledger"]
+    B0["Record #0<br/>prev: 0000...<br/>sig: HMAC(K, R_0)"] --> B1["Record #1 (Scan/Waiver)<br/>prev: R_0<br/>sig: HMAC(K, R_1)"]
+    B1 --> B2["Record #2 (Auto-Merge)<br/>prev: R_1<br/>sig: HMAC(K, R_2)"]
+  end
+```
 
-Open `docs/architecture.md` or the architecture SVG. Emphasize that tools produce facts and numbers, agents
-interpret those facts, and the orchestrator prevents agents from writing code or declaring success.
+### Cryptographic Verification Equations
 
-### 3. Day 1 discovery (60 seconds)
+$$\text{MerkleLeaf}_i = \text{SHA256}\big(\text{FileBytes}[4096i : 4096(i+1)]\big), \qquad \text{SampleIdx} = \text{HMAC-SHA256}(K_{\text{sign}}, \text{nonce} \,\|\, \text{path} \,\|\, c) \bmod N$$
 
-Open Overview and Matrix:
+$$R_n = \text{SHA256}\big(n \,\|\, R_{n-1} \,\|\, \text{CanonicalJSON}(\text{Data}_n)\big), \qquad \text{HeadSig}_n = \text{HMAC-SHA256}(K_{\text{sign}}, R_n)$$
 
-- 1,091 components in the current NodeGoat snapshot;
-- direct/transitive and production/development split;
-- full graph and CycloneDX SBOM;
-- coverage gaps instead of guessed values.
+---
 
-Click a package and trace its parent path. Then open one OSV finding and one non-CVE indicator.
+## Slide 4: Live Threat Intelligence & Mathematical Risk Engine
 
-### 4. Evidence and investigation (75 seconds)
+```mermaid
+flowchart TD
+  PURL["Canonical Component<br/>pkg:eco/name@version"] --> OSV["OSV.dev /v1/querybatch"]
+  PURL --> DEPS["Google api.deps.dev<br/>+ Registry Search APIs"]
+  PURL --> REGS["Official Registries<br/>npm · PyPI · Maven Central"]
 
-Open the findings and Agents views. Show:
+  OSV -->|MAL-*| MAL["OSV-MAL: Known Malicious<br/>Category: malicious · Score: 100"]
+  OSV -->|CVE / GHSA| CVE["CVSS v3.1 & CVSS v4.0 Calculator"]
+  CVE --> KEV["CISA KEV + FIRST EPSS API"]
 
-- OSV record, affected range, fixed version, CVSS and evidence URL;
-- indicator evidence such as an off-registry moving branch or EOL container image;
-- Red Team verified facts with evidence IDs separated from inference;
-- audit events showing tool calls and guardrail checks.
+  DEPS --> TYPO["SC9: Multi-Eco Typosquat<br/>Damerau-Levenshtein · Homoglyph · Swap"]
+  REGS -->|HTTP 404| PROV["SC10: Unknown Provenance / Confusion"]
+  REGS -->|Age < 7d / 30d| AGE["SC11: Brand-New Release / Package"]
 
-Say: “The LLM can propose a hypothesis, but it cannot invent a finding ID, CVE, evidence ID, score, or verdict.”
+  MAL & KEV & TYPO & PROV & AGE --> SCORE["Deterministic Risk Formula (0-100)"]
+```
 
-### 5. Day 2 prioritization (60 seconds)
+### Core Scoring Equations
 
-Open the top priority's factor breakdown. Explain the difference between a high-CVSS unused dev package and a
-reachable production dependency. Point out exposure, import reachability, directness, EPSS/KEV, and the deterministic
-formula score.
+$$\text{RiskScore} = \min\!\left(100,\; \underbrace{40 \cdot \frac{\text{CVSS}}{10}}_{\text{0–40 pts}} + \underbrace{\begin{cases} 25 & \text{in CISA KEV} \\ 15 \cdot \text{EPSS} & \text{otherwise} \end{cases}}_{\text{0–25 pts}} + \underbrace{\begin{cases} 15 & \text{prod} \\ 3 & \text{dev} \end{cases}}_{\text{3–15 pts}} + \underbrace{\begin{cases} 15 & \text{direct import} \\ 8 & \text{transitive import} \\ 0 & \text{unimported} \end{cases}}_{\text{0–15 pts}} + \underbrace{\begin{cases} 5 & \text{direct} \\ 0 & \text{transitive} \end{cases}}_{\text{0–5 pts}}\right)$$
 
-### 6. Remediation and approval (60 seconds)
+$$\text{IndicatorScore} = \text{clamp}_{[0,100]}\!\Big(W_{\text{rule}} + X_{\text{prod/dev}} + H_{\text{git\_commit}}\Big), \qquad \text{Confidence} = \frac{N_{\text{observed\_factors}}}{5}$$
 
-Open a proposal diff. Show its exact files, compatibility notes, prerequisites, rollback, and candidate hash. Explain
-that Blue Team chooses only a computed candidate; it cannot invent a patch. Approve one low-risk change and leave a
-second one rejected or pending to demonstrate human control.
+---
 
-### 7. Independent validation and report (90 seconds)
+## Slide 5: Multi-Agent System & Autonomous Test-Driven Mitigation
 
-Open the validation card and call out the sequence: fresh copy → safe lockfile regeneration → baseline rescan →
-patched rescan → SBOM diff → trusted unit/HTTP checks → teardown. Show `verified`, `partial`, or `failed` according
-to the evidence. Finish on `report.md` and `report.json`: remaining risk, resolved targets, introduced findings,
-coverage gaps, approvals, identity, and evidence index.
+```mermaid
+sequenceDiagram
+  autonumber
+  participant O as Orchestrator
+  participant A as Attack & Integrity Agents
+  participant R as Risk & Defense Agents
+  participant G as Human Gate / Top-Bar Toggle
+  participant T as Test Generator (GEMINI_API_FOR_TESTING)
+  participant S as Sandbox & Auto-Merge
 
-## Claims to avoid
+  O->>A: Findings (SC1-SC11, IT1-IT2, OSV-MAL)
+  A->>A: Call read-only tools & verify citations (EV-*)
+  A-->>O: Verified Facts vs Inferences + Forensic Attack Paths
+  O->>R: Ranked Findings + Deterministic Fix Candidates
+  R-->>O: Ordered Proposals (FIX-VULN, FIX-OVR, FIX-LOCK, FIX-SHDW, FIX-CI)
+  O->>G: Present Diffs (or Auto-Approve if Autonomous Toggle ON)
+  G->>T: Trigger Sandbox Validation
+  T->>T: Discover Existing Tests OR Generate _guardian_smoke_test
+  T->>S: Apply Patch + Run Tests in Isolated Copy
+  S-->>O: Exit 0 -> Auto-Merge to Repo + Re-Sign Merkle Baseline & Ledger
+```
 
-- Do not say “all vulnerabilities are fixed” because a scan is clean only for the scanned snapshot and data sources.
-- Do not call static-only validation verified.
-- Do not claim function-level exploitability; reachability is package/import-level.
-- Do not say the LLM computed scores or applied a patch; both are false.
-- Do not run a random repository's Dockerfile during the demo; unknown targets are intentionally static-only.
-- Do not show credentials, private repositories, production systems, or a real malicious package.
+---
 
-## Likely judge questions
+## Slide 6: Complete Tech Stack, SDKs & Open Tools
 
-**Why is this agentic instead of a prompt over scanner output?** Each specialist has a role, typed tools, a bounded
-loop, a structured result, evidence citations, and a hand-off. The orchestrator can run without an LLM but labels
-that fallback, so the evidence pipeline remains reproducible.
+```mermaid
+flowchart TB
+  subgraph SDK["Official AI & Agent SDKs"]
+    GSDK["Google GenAI SDK<br/>(google-genai / google.genai)"]
+    CSDK["Anthropic Claude SDK<br/>(anthropic Messages API)"]
+    FALL["Deterministic Rule-Based<br/>Fallback Engine (--llm none)"]
+  end
 
-**Why not sort by CVSS?** The risk formula includes production exposure, import reachability, dependency path,
-directness, EPSS, and CISA KEV. The report shows every factor and confidence.
+  subgraph OPEN["Open Security Feeds & Registries"]
+    F1["OSV.dev Batch API"]
+    F2["CISA KEV Catalog"]
+    F3["FIRST EPSS API"]
+    F4["Google deps.dev API"]
+    F5["npm · PyPI · Maven Central<br/>Crates.io · RubyGems · Packagist"]
+  end
 
-**Can the model make a dangerous change?** No. It can only select a candidate generated by deterministic code. A
-human approves each proposal, and the validator applies it only to a fresh copy after drift/hash checks.
+  subgraph CORE["Core Runtime & Standards"]
+    C1["Python 3.11+ · FastAPI · Uvicorn"]
+    C2["Docker & Compose v2 Sandbox"]
+    C3["CycloneDX 1.5 SBOM · PURL · CVSS v3.1 & v4.0"]
+    C4["SHA-256 Merkle Trees · HMAC-SHA256 Chained Ledger"]
+    C5["Force-Graph HTML5 Canvas Dashboard"]
+  end
 
-**What does “verified” mean?** Targets disappeared in the validator's rescan, no high/critical finding was introduced,
-the trusted runtime/test checks passed, and the baseline comparison is recorded. Otherwise the result is partial or
-failed.
-
-**What happens when no safe automatic fix exists?** The issue is escalated with a manual recommendation and remains
-in the report's remaining-risk section.
-
-**How do you protect secrets and the host?** File excerpts are redacted before LLM calls; GitHub ingestion disables
-hooks/prompts/submodules; runtime is allowlisted, policy-checked Docker only; and no target changes are merged or
-deployed.
-
-## Closing sentence
-
-“Guardian does not replace engineering judgment. It makes the judgment faster and safer by connecting evidence,
-context, approval, and independent proof in one auditable loop.”
+  SDK --> CORE
+  OPEN --> CORE
+```

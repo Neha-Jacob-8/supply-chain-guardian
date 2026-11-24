@@ -284,4 +284,88 @@ def build_candidates(repo, comps, findings, cache_dir, offline=False):
                 {name: (text, new)}, closes, "high",
                 "The app uses the mongodb 2.x driver, which predates MongoDB 7 wire protocol changes: likely to break.",
                 "Revert the image tag in docker-compose"))
+
+    # 6) shadow / phantom dependencies (SC8) -> add explicit pin to requirements.txt or package.json
+    for f in findings:
+        if f.get("rule_id") != "SC8" or f.get("category") == "malicious":
+            continue
+        ev = f.get("evidence") or {}
+        if ev.get("vulnerable"):
+            continue
+        eco, pkg, ver = ev.get("ecosystem"), ev.get("package"), ev.get("resolved_version") or ""
+        cid = f.get("component_id")
+        if eco == "pypi":
+            req_path = repo / "requirements.txt"
+            if req_path.exists():
+                old_req = req_path.read_text()
+                pin_line = f"{pkg}=={ver}" if ver else pkg
+                if not re.search(rf"(?im)^{re.escape(pkg)}\s*([=<>!~]|$)", old_req):
+                    new_req = old_req.rstrip("\n") + ("\n" if old_req.strip() else "") + pin_line + "\n"
+                    out.append(_candidate(
+                        "SHDW", f"requirements.txt:{pkg}", "pin",
+                        f"Declare shadow dependency {pin_line} in requirements.txt",
+                        {"requirements.txt": (old_req, new_req)}, [f["finding_id"]], "low",
+                        f"Explicitly pins '{pkg}' (imported in {ev.get('path')}:{ev.get('line')}) in requirements.txt.",
+                        "Remove the added line from requirements.txt", cid))
+        elif eco == "npm":
+            pj_path = repo / "package.json"
+            if pj_path.exists():
+                try:
+                    old_pj = pj_path.read_text()
+                    pj_data = json.loads(old_pj)
+                except (OSError, json.JSONDecodeError):
+                    pj_data = None
+                if isinstance(pj_data, dict):
+                    deps = dict(pj_data.get("dependencies") or {})
+                    if pkg not in deps:
+                        deps[pkg] = ver or "*"
+                        new_pj = json.dumps({**pj_data, "dependencies": deps}, indent=2) + "\n"
+                        out.append(_candidate(
+                            "SHDW", f"package.json:{pkg}", "pin",
+                            f'Declare shadow dependency "{pkg}": "{deps[pkg]}" in package.json',
+                            {"package.json": (old_pj, new_pj)}, [f["finding_id"]], "low",
+                            f"Explicitly declares '{pkg}' (imported in {ev.get('path')}:{ev.get('line')}) in package.json.",
+                            f'Remove "{pkg}" from dependencies in package.json', cid, needs_lockfile_regen=bool(ver)))
+        elif eco == "cargo":
+            ct_path = repo / "Cargo.toml"
+            if ct_path.exists():
+                old_ct = ct_path.read_text()
+                pin_line = f'{pkg} = "{ver or "*"}"'
+                if "[dependencies]" in old_ct and not re.search(rf"(?m)^\s*{re.escape(pkg)}\s*=", old_ct):
+                    new_ct = old_ct.replace("[dependencies]", f"[dependencies]\n{pin_line}", 1)
+                    out.append(_candidate(
+                        "SHDW", f"Cargo.toml:{pkg}", "pin",
+                        f"Declare shadow crate {pin_line} in Cargo.toml",
+                        {"Cargo.toml": (old_ct, new_ct)}, [f["finding_id"]], "low",
+                        f"Explicitly declares crate '{pkg}' (used in {ev.get('path')}:{ev.get('line')}) in Cargo.toml.",
+                        f"Remove {pkg} from Cargo.toml", cid))
+        elif eco == "maven":
+            pom_path = repo / "pom.xml"
+            if pom_path.exists() and "</dependencies>" in pom_path.read_text():
+                old_pom = pom_path.read_text()
+                g, _, a = pkg.partition(":")
+                a = a or g.split(".")[-1]
+                v_tag = f"<version>{ver}</version>" if ver else ""
+                dep_xml = f"    <dependency><groupId>{g}</groupId><artifactId>{a}</artifactId>{v_tag}</dependency>\n  </dependencies>"
+                if a not in old_pom:
+                    new_pom = old_pom.replace("</dependencies>", dep_xml, 1)
+                    out.append(_candidate(
+                        "SHDW", f"pom.xml:{pkg}", "pin",
+                        f"Declare shadow Maven artifact {g}:{a} in pom.xml",
+                        {"pom.xml": (old_pom, new_pom)}, [f["finding_id"]], "low",
+                        f"Explicitly declares '{g}:{a}' (imported in {ev.get('path')}:{ev.get('line')}) in pom.xml.",
+                        f"Remove {g}:{a} from pom.xml", cid))
+        elif eco == "golang":
+            gm_path = repo / "go.mod"
+            if gm_path.exists():
+                old_gm = gm_path.read_text()
+                req_line = f"\nrequire {pkg} {ver or 'v0.0.0'}\n"
+                if pkg not in old_gm:
+                    new_gm = old_gm.rstrip("\n") + req_line
+                    out.append(_candidate(
+                        "SHDW", f"go.mod:{pkg}", "pin",
+                        f"Declare shadow Go module {pkg} in go.mod",
+                        {"go.mod": (old_gm, new_gm)}, [f["finding_id"]], "low",
+                        f"Explicitly declares '{pkg}' (imported in {ev.get('path')}:{ev.get('line')}) in go.mod.",
+                        f"Remove {pkg} from go.mod", cid))
     return out

@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 
 GITHUB = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+GITHUB_DOMAIN = re.compile(r"^github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+GITHUB_SHORTHAND = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$")
 
 
 def _git(repo, *args):
@@ -57,9 +59,13 @@ def _matches_remote(dest, owner, repo):
 
 
 def parse_github_url(url):
-    m = GITHUB.match(url.strip())
-    if not m or m.group(2) in (".", ".."):
-        raise ValueError("only public https://github.com/<owner>/<repo> URLs are accepted")
+    val = url.strip()
+    m = GITHUB.match(val) or GITHUB_DOMAIN.match(val)
+    if not m and not val.startswith(("http://", "https://", "git@", "ssh://", "file://", "/", "./", "../")):
+        if not Path(val).exists():
+            m = GITHUB_SHORTHAND.match(val)
+    if not m or m.group(1) in (".", "..") or m.group(2) in (".", ".."):
+        raise ValueError("only public https://github.com/<owner>/<repo> URLs or owner/repo shorthand are accepted")
     return m.group(1), m.group(2)
 
 
@@ -89,10 +95,13 @@ def clone(url, dest_root="targets", depth=50, ref=None):
 
 
 def resolve_target(target, dest_root="targets"):
-    """A local path is used as-is; a GitHub URL is cloned (or reused) under dest_root."""
-    if target.startswith(("http://", "https://", "git@", "ssh://", "file://")):
-        return clone(target, dest_root)
-    p = Path(target)
-    if not p.is_dir():
-        raise ValueError(f"{target} is neither a directory nor a GitHub URL")
-    return p
+    """A local path is used as-is; a GitHub URL or owner/repo shorthand is cloned (or reused) under dest_root."""
+    t = target.strip()
+    if t.startswith(("http://", "https://", "git@", "ssh://", "file://")):
+        return clone(t, dest_root)
+    p = Path(t)
+    if p.is_dir():
+        return p
+    if GITHUB_DOMAIN.match(t) or GITHUB_SHORTHAND.match(t):
+        return clone(t, dest_root)
+    raise ValueError(f"{target} is neither a directory nor a GitHub URL")

@@ -82,21 +82,22 @@ $('#runForm').addEventListener('submit', async e => {
   e.preventDefault();
   const target = $('#target').value.trim();
   if (!target) { $('#target').focus(); return; }
+  const auto_merge = !!$('#autoMergeToggle')?.checked;
   try {
-    await post('/runs', { target, llm: $('#llm').value });
+    await post('/runs', { target, llm: $('#llm').value, auto_merge });
     S.events = []; S.lastT = 0; renderEvents();
-    banner('Run started: cloning and analysing…', 'info'); poll();
+    banner(auto_merge ? 'Autonomous run started: cloning, analysing, generating tests & auto-merging passing fixes…' : 'Run started: cloning and analysing…', 'info'); poll();
   } catch (err) { banner(esc(err.message)); }
 });
 
 /* ---------------- load all data ---------------- */
 async function loadAll() {
   const safe = p => get(p).catch(() => null);
-  const [ov, graph, matrix, findings, inv, pri, props, vals, escs, gaps, changes, inventory] = await Promise.all([
+  const [ov, graph, matrix, findings, inv, pri, props, vals, escs, gaps, changes, inventory, integrity] = await Promise.all([
     safe('/overview'), safe('/graph'), safe('/matrix?limit=5000'), safe('/findings?limit=5000'), safe('/investigations'),
-    safe('/priorities'), safe('/proposals'), safe('/validations'), safe('/escalations'), safe('/coverage'), safe('/changes'), safe('/inventory')]);
+    safe('/priorities'), safe('/proposals'), safe('/validations'), safe('/escalations'), safe('/coverage'), safe('/changes'), safe('/inventory'), safe('/integrity')]);
   Object.assign(S, { overview: ov, graph, matrix: matrix?.rows || [], findings: findings?.findings || [], inv: inv || [],
-    pri: pri || [], props: props || [], vals: vals || [], escs: escs || [], gaps: gaps || [], changes: changes || [], inventory: inventory || {} });
+    pri: pri || [], props: props || [], vals: vals || [], escs: escs || [], gaps: gaps || [], changes: changes || [], inventory: inventory || {}, integrity: integrity || {} });
   S.compIndex = Object.fromEntries(S.matrix.map(r => [r.component_id, r]));
   S.findByComp = {}; S.findings.forEach(f => (S.findByComp[f.component_id] ||= []).push(f));
   fillEcoSelects(); renderOverview(); renderMatrix(); renderFindings(); renderAgents(); renderRemediation(); renderValidation(); renderCoverage();
@@ -132,6 +133,22 @@ function renderOverview() {
   $('#changes').innerHTML = S.changes.length ? S.changes.slice(0, 12).map(c => `<div><span class="chip">${esc(c.date || '')}</span><code>${esc(c.commit)}</code><b>${esc(c.subject || '')}</b>
       <span class="muted">${c.note ? esc(c.note) : `+${c.added} / −${c.removed} / ~${c.version_changed}${c.hash_algorithm_upgrades ? ` · ${c.hash_algorithm_upgrades} hash upgrades (benign)` : ''}`}</span></div>`).join('')
     : '<p class="muted">No lockfile history (only npm lockfiles are diffed across commits).</p>';
+  const ig = S.integrity || {};
+  if ($('#integrityBox')) {
+    const baseChip = ig.has_baseline ? chip(ig.baseline_ok ? 'Merkle Baseline OK' : `Merkle Tamper (${(ig.anomalies || []).length})`, ig.baseline_ok ? 'v-verified' : 'v-failed') : chip('No Merkle baseline yet', 'ghost');
+    const ledChip = ig.has_ledger ? chip(ig.ledger_ok ? 'Hash-Chained Ledger OK' : 'Ledger Chain Broken', ig.ledger_ok ? 'v-verified' : 'v-failed') : chip('No Ledger yet', 'ghost');
+    $('#integrityBox').innerHTML = `${baseChip} ${ledChip} <span class="muted" style="font-size:12px">${esc(ig.ledger_message || '')}</span>
+      <input id="signKeyInput" type="password" placeholder="Signing passphrase (or uses .env)" style="margin-left:auto;max-width:220px;padding:4px 8px;font-size:12px">
+      <button class="btn" id="signBaselineBtn">Sign Merkle Baseline</button>`;
+    $('#signBaselineBtn')?.addEventListener('click', async () => {
+      try {
+        const key = $('#signKeyInput')?.value.trim() || null;
+        const res = await post('/integrity/baseline', { key, signer: 'developer (dashboard)' });
+        banner(`Signed 4096B Merkle baseline (${res.files} files, HMAC ${String(res.hmac || '').slice(0, 14)}…)`, 'info');
+        await loadAll();
+      } catch (e) { banner(esc(e.message)); }
+    });
+  }
 }
 
 /* ---------------- network ---------------- */
@@ -139,6 +156,7 @@ let FG = null, netShow = 'all';
 const nodeColor = n => {
   if (n.type === 'root') return css('--accent');
   if (n.type === 'project') return css('--text');
+  if (n.risk_status === 'malicious') return css('--critical');
   if (n.risk_status === 'vulnerable') return css({ CRITICAL: '--critical', HIGH: '--high', MEDIUM: '--medium', LOW: '--low' }[n.severity] || '--info');
   if (n.risk_status === 'suspicious') return css('--suspicious');
   if (n.risk_status === 'maintenance') return css('--maintenance');
@@ -303,8 +321,8 @@ function renderFindings() {
   const c = $('#fCat').value, sv = $('#fSev').value, q = $('#fQ').value.toLowerCase();
   const fs = S.findings.filter(f => (!c || f.category === c) && (!sv || f.risk?.severity === sv) && (!q || `${f.title} ${f.rule_id} ${f.component_id || ''}`.toLowerCase().includes(q)));
   $('#fCount').textContent = `${fs.length.toLocaleString()} findings`;
-  $('#fList').innerHTML = fs.slice(0, 600).map(f => `<div class="fitem sev-${f.risk?.severity || 'UNKNOWN'} ${S.selFinding === f.finding_id ? 'on' : ''}" data-f="${esc(f.finding_id)}">
-      <div class="t">${esc(f.title)}</div><div class="m"><span class="ev-${esc(f.evidence_class)}">${esc(f.evidence_class === 'verified' ? 'VERIFIED' : 'INDICATOR')}</span>
+  $('#fList').innerHTML = fs.slice(0, 600).map(f => `<div class="fitem sev-${f.waived ? 'LOW' : (f.risk?.severity || 'UNKNOWN')} ${S.selFinding === f.finding_id ? 'on' : ''}" style="${f.waived ? 'opacity:0.65' : ''}" data-f="${esc(f.finding_id)}">
+      <div class="t">${f.waived ? '[BYPASSED] ' : ''}${esc(f.title)}</div><div class="m"><span class="ev-${esc(f.evidence_class)}">${esc(f.evidence_class === 'verified' ? 'VERIFIED' : 'INDICATOR')}</span>
       <span>${esc(f.rule_id)}</span><span>${esc(short(f.component_id) || f.evidence?.path || '')}</span><span>risk ${f.risk?.score ?? '–'}</span></div></div>`).join('') || '<div class="empty">No findings match.</div>';
   $$('#fList .fitem').forEach(el => el.addEventListener('click', () => selectFinding(el.dataset.f)));
 }
@@ -314,8 +332,15 @@ function selectFinding(id) {
   const f = S.findings.find(x => x.finding_id === id); if (!f) return;
   const r = f.risk || {}, fac = Object.entries(r.factors || {}), pos = fac.filter(([, v]) => v.points > 0), sum = pos.reduce((a, [, v]) => a + v.points, 0) || 1;
   const ev = f.evidence || {};
-  $('#fDetail').innerHTML = `<div class="row2"><span class="ev-${esc(f.evidence_class)} chip ghost">${f.evidence_class === 'verified' ? 'Verified · OSV' : 'Indicator · rule ' + esc(f.rule_id)}</span>${sevChip(r.severity)}<span class="chip ghost">${esc(f.category)}</span></div>
+  const w = f.waiver;
+  $('#fDetail').innerHTML = `<div class="row2"><span class="ev-${esc(f.evidence_class)} chip ghost">${f.evidence_class === 'verified' ? 'Verified · OSV' : 'Indicator · rule ' + esc(f.rule_id)}</span>${sevChip(r.severity)}<span class="chip ghost">${esc(f.category)}</span>${f.waived ? chip('Bypassed by Human', 'v-verified') : ''}</div>
     <h4 style="font-size:17px;margin:4px 0 14px">${esc(f.title)}</h4>
+    ${f.waived && w ? `<div class="note" style="margin-bottom:12px"><b>Human Bypass Active:</b> ${esc(w.reason)} <span class="muted">(${esc(w.by)} · ledger <code>${esc((w.ledger_hash || '').slice(0, 12))}</code>)</span>
+      <button class="btn" id="unwaiveBtn" style="margin-left:10px">Restore Warning</button></div>` : `
+      <div class="row2" style="margin-bottom:12px;padding:8px;border:1px solid var(--border);border-radius:6px">
+        <input id="waiveReason" placeholder="Reason to bypass/accept this warning after reviewing detail…" style="flex:1;padding:4px 8px;font-size:12px">
+        <button class="btn" id="waiveBtn">Bypass / Dismiss Warning</button>
+      </div>`}
     <div style="display:flex;gap:28px;align-items:flex-end"><div><div class="score">${r.score ?? '–'}</div><span class="muted" style="font-size:11px">RISK SCORE (FORMULA)</span></div>
       <div><span class="meter"><i style="width:${(r.confidence || 0) * 100}%"></i></span> <span class="muted" style="font-size:12px">confidence ${Math.round((r.confidence || 0) * 100)}%</span></div></div>
     <div class="factors">${pos.map(([k, v], i) => `<i title="${esc(k)}: +${v.points} (${esc(v.why)})" style="width:${v.points / sum * 100}%;background:var(${FACTOR_COLORS[i % 6]})"></i>`).join('')}</div>
@@ -331,6 +356,23 @@ function selectFinding(id) {
       ${ev.sha256 ? `<dt>SHA-256</dt><dd class="mono" style="font-size:11px">${esc(ev.sha256)}</dd>` : ''}</dl>
     ${ev.excerpt ? `<pre class="ev">${esc(ev.excerpt)}</pre>` : ''}`;
   $('#fDetail [data-net]')?.addEventListener('click', e => { e.preventDefault(); focusNode(f.component_id); });
+  $('#waiveBtn')?.addEventListener('click', async () => {
+    const reason = $('#waiveReason')?.value.trim() || 'Verified safe / accepted risk after inspecting finding detail';
+    try {
+      const updated = await post(`/findings/${encodeURIComponent(f.finding_id)}/waive`, { reason, action: 'waive' });
+      Object.assign(f, updated);
+      banner(`Bypassed warning ${esc(f.finding_id)} (recorded in tamper-evident ledger)`, 'info');
+      renderFindings(); selectFinding(f.finding_id);
+    } catch (e) { banner(esc(e.message)); }
+  });
+  $('#unwaiveBtn')?.addEventListener('click', async () => {
+    try {
+      await post(`/findings/${encodeURIComponent(f.finding_id)}/waive`, { action: 'unwaive' });
+      delete f.waived; delete f.waiver;
+      banner(`Restored warning ${esc(f.finding_id)}`, 'info');
+      renderFindings(); selectFinding(f.finding_id);
+    } catch (e) { banner(esc(e.message)); }
+  });
 }
 
 /* ---------------- agents ---------------- */
@@ -356,22 +398,27 @@ $('#dClose').addEventListener('click', () => $('#drawer').hidden = true);
 /* ---------------- remediation ---------------- */
 function renderRemediation() {
   const vmap = Object.fromEntries(S.vals.map(v => [v.candidate_id, v.verdict]));
+  const mmap = Object.fromEntries(S.vals.map(v => [v.candidate_id, v]));
   const pending = S.props.filter(p => (p.approval || {}).status === 'pending').length;
   $('#pendingCount').textContent = pending || '';
   $('#props').innerHTML = S.props.map((p, i) => {
-    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], ap = p.applied;
+    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], valObj = mmap[p.candidate_id], ap = p.applied;
+    const mergedChip = valObj?.merged ? chip('Auto-Merged', 'v-verified') : (ap ? chip(ap.status === 'applied' ? 'applied' : 'not applied: ' + ap.status, ap.status === 'applied' ? 'v-verified' : 'v-partial') : '');
+    const testChip = valObj?.test_info ? chip(valObj.test_info.kind === 'generated' ? 'LLM/Smoke Test Generated' : 'Existing Tests', 'ghost') : '';
+    const canDecide = st === 'pending' || (verdict === 'failed' && !valObj?.merged && ap?.status !== 'applied');
     return `<div class="card ${verdict ? 'v-' + verdict : 'v-' + st}" style="--c:var(--c);animation-delay:${i * 40}ms" data-id="${esc(p.candidate_id)}">
-      <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}${ap ? chip(ap.status === 'applied' ? 'applied' : 'not applied: ' + ap.status, ap.status === 'applied' ? 'v-verified' : 'v-partial') : ''}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
+      <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}${mergedChip}${testChip}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
       <h4>${esc(p.summary)}</h4><p style="margin:0 0 8px">${esc(p.rationale)}</p>
       <dl class="kv"><dt>Compatibility</dt><dd>${esc(p.compat_assessment)}</dd><dt>Expected</dt><dd>${esc(p.expected_risk_reduction)}${/prediction/i.test(p.expected_risk_reduction || '') ? '' : ' <span class="muted">(prediction)</span>'}</dd><dt>Rollback</dt><dd>${esc(p.rollback)}</dd></dl>
-      <div class="actions">${st === 'pending' ? `<button class="btn ok" data-a="approve">Approve</button><button class="btn no" data-a="reject">Reject</button>` : ''}<button class="btn" data-diff>View diff</button></div><div class="diffbox"></div></div>`;
+      <div class="actions">${canDecide ? `<button class="btn ok" data-a="approve">Approve</button><button class="btn no" data-a="reject">Reject</button>` : ''}<button class="btn" data-diff>View diff</button></div><div class="diffbox"></div></div>`;
   }).join('') || '<div class="empty">No remediation proposals yet.</div>';
   $('#escs').innerHTML = S.escs.length ? `<h3 class="sect">Escalated to a human</h3>${S.escs.map(e => `<div class="note">${esc(e.reason)} <span class="muted">(${e.finding_ids.length} finding${e.finding_ids.length > 1 ? 's' : ''})</span></div>`).join('')}` : '';
   $$('#props [data-a]').forEach(b => b.addEventListener('click', () => decide(b.closest('.card').dataset.id, b.dataset.a, b)));
   $$('#props [data-diff]').forEach(b => b.addEventListener('click', () => toggleDiff(b.closest('.card'))));
   const approved = S.props.filter(p => (p.approval || {}).status === 'approved' && !vmap[p.candidate_id]).length;
-  const toApply = S.props.filter(p => p.applicable && (!p.applied || p.applied.status !== 'applied')).length;
-  $('#approvedCount').textContent = `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
+  const toApply = S.props.filter(p => p.applicable && !mmap[p.candidate_id]?.merged && (!p.applied || p.applied.status !== 'applied')).length;
+  const mergedCnt = S.props.filter(p => mmap[p.candidate_id]?.merged).length;
+  $('#approvedCount').textContent = (mergedCnt ? `${mergedCnt} auto-merged · ` : '') + `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
   $('#validateBtn').disabled = !(approved || toApply) || S.status.running;
 }
 async function decide(id, decision, btn) {
@@ -401,13 +448,17 @@ function renderValidation() {
     const c = v.comparison || {}, b = c.before || {}, a = c.after || {};
     const delta = (x, y) => { const d = (y ?? 0) - (x ?? 0); return d ? `<span class="${d < 0 ? 'delta-down' : 'delta-up'}">${d > 0 ? '+' : ''}${d}</span>` : '<span class="muted">±0</span>'; };
     const runtimeLabel = x => x === null || x === undefined ? 'n/a' : x ? 'pass' : 'fail';
-    return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || '')}</span></div>${chip(v.verdict, 'v-' + v.verdict)}</div>
-      ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}${ap.validation && ap.validation !== 'verified' ? `<br><span class="muted">${esc(ap.validation)}</span>` : ''}</p>` : !(S.props.find(p => p.candidate_id === v.candidate_id) || {}).applicable ? '<p class="muted" style="margin:0 0 10px">Not applied: failed, runtime-failing or incomplete fixes are never written to the repository.</p>' : ''}
-      <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
-          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+    const ti = v.test_info;
+    return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || v.validated_by || '')}</span></div><div class="row2">${v.merged ? chip('Auto-Merged', 'v-verified') : ''}${chip(v.verdict, 'v-' + v.verdict)}</div></div>
+      ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}${ap.validation && ap.validation !== 'verified' ? `<br><span class="muted">${esc(ap.validation)}</span>` : ''}</p>` : (!v.merged && !(S.props.find(p => p.candidate_id === v.candidate_id) || {}).applicable) ? '<p class="muted" style="margin:0 0 10px">Not applied: failed, runtime-failing or incomplete fixes are never written to the repository.</p>' : ''}
+      <div class="vgrid"><ul class="tl">${v.steps.map(s => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
+          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail && s.name !== 'generate_smoke_test' ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>view log</summary><pre class="ev" style="max-height:140px">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>
           <div><span>Targets resolved</span><b>${(c.resolved || []).length}/${c.targets}</b></div><div><span>Newly introduced</span><b>${c.introduced_count}</b> ${(c.introduced_high || []).length ? chip(`${c.introduced_high.length} high`, 'sev-HIGH') : ''}</div>
-          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>` : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
+          <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>`
+          : ti ? `<div class="nums"><div><span>Test source</span><b>${esc(ti.kind)}</b></div><div><span>Generator</span><b>${esc(ti.generator || 'existing')}</b></div><div><span>Test file</span><b class="mono">${esc((ti.files || []).join(', '))}</b></div><div><span>Auto-merged</span><b>${v.merged ? 'yes (' + (v.merged_files || []).join(', ') + ')' : 'no'}</b></div></div>
+            ${ti.code ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">View generated smoke test (${esc((ti.files || [])[0] || '')})</summary><pre class="ev" style="max-height:180px">${esc(ti.code)}</pre></details>` : ''}`
+          : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
   }).join('') || '<div class="empty">No validations yet. Approve fixes under Remediation, then run independent validation.</div>';
 }
 

@@ -20,7 +20,10 @@ class FakeMessages:
 class ClaudeClient(unittest.TestCase):
     def test_request_shape_and_parsing(self):
         c = L.ClaudeLLM.__new__(L.ClaudeLLM)
-        import anthropic
+        try:
+            import anthropic
+        except ImportError:
+            anthropic = NS(RateLimitError=Exception, InternalServerError=Exception, APIConnectionError=Exception)
         c.anthropic, c.model, c.effort = anthropic, "claude-opus-5-5", "medium"
         fake = FakeMessages()
         c.client = NS(beta=NS(messages=fake))

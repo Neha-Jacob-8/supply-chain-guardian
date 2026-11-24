@@ -12,7 +12,7 @@ license = { text = "Proprietary (hackathon prototype)" }
 dependencies = ["pyyaml>=6"]   # only for pnpm-lock.yaml; everything else uses the standard library
 
 [project.optional-dependencies]
-llm = ["anthropic>=2.12"]      # Claude-backed agents; without it agents run their labelled rule-based fallbacks
+llm = ["google-genai>=1.0.0", "anthropic>=2.12"]      # Official Google GenAI SDK (google.genai) + Anthropic SDK
 api = ["fastapi>=0.115", "uvicorn>=0.30"]   # `guardian serve` for the dashboard
 all = ["supply-chain-guardian[llm,api]"]
 
