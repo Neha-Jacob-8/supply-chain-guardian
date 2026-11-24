@@ -175,9 +175,13 @@ def create_remediation_pr(
     """Fork (if needed), commit validated changes to a Dependabot-style branch, push, and raise a GitHub PR."""
     repo = Path(repo_path)
     out = Path(out_dir)
-    aid = (app_id or os.environ.get("GITHUB_APP_ID", "")).strip()
+    aid = (
+        app_id
+        or os.environ.get("GITHUB_APP_CLIENT_ID", "")
+        or os.environ.get("GITHUB_APP_ID", "")
+    ).strip()
     if not aid:
-        raise RuntimeError("GITHUB_APP_ID is not set in .env or environment.")
+        raise RuntimeError("GITHUB_APP_CLIENT_ID or GITHUB_APP_ID is not set in .env or environment.")
     pem = resolve_pem_path(pem_path)
 
     rc, remote_url = _git(repo, "config", "--get", "remote.origin.url")
