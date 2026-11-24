@@ -5,6 +5,7 @@ from pathlib import Path
 
 from guardian.agents.state import RunState
 from guardian.remediation import apply_verified
+from guardian.remediation.apply import eligible
 
 REQS = "anyio==4.7.0\nflask==3.1.0\nrequests==2.32.3\nsix==1.17.0\ntorch==2.5.1\n"
 
@@ -93,6 +94,36 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(recs[0]["files"], ["package-lock.json", "package.json"])
         self.assertIn("1.1.4", (repo / "package-lock.json").read_text())
         self.assertIn("1.1.4", (repo / "package.json").read_text())
+
+    def test_static_only_partial_is_applied_only_when_the_rescan_is_clean(self):
+        clean = {"targets": 2, "remaining": [], "introduced_high": [], "smoke": {"after_ok": None}}
+        self.assertEqual(eligible({"verdict": "verified"}), "verified")
+        self.assertEqual(eligible({"verdict": "partial", "comparison": clean}), "static")
+        self.assertIsNone(eligible({"verdict": "partial", "comparison": clean | {"remaining": ["F1"]}}))
+        self.assertIsNone(eligible({"verdict": "partial", "comparison": clean | {"introduced_high": ["k"]}}))
+        self.assertIsNone(eligible({"verdict": "partial", "comparison": clean | {"smoke": {"after_ok": False}}}))
+        self.assertIsNone(eligible({"verdict": "partial", "comparison": clean | {"targets": 0}}))
+        self.assertIsNone(eligible({"verdict": "failed", "comparison": clean}))
+        s, repo, cands = setup({"FIX-A": "partial"})
+        s.validations[0]["comparison"] = clean
+        recs = apply_verified(s, cands)
+        self.assertEqual(recs[0]["status"], "applied")
+        self.assertIn("static rescan only", recs[0]["validation"])
+        self.assertIn("static rescan only", git(repo, "log", "-1", "--format=%B"))
+
+    def test_pending_proposals_are_superseded_after_fixes_are_applied(self):
+        from guardian.agents.orchestrator import Orchestrator
+        s, repo, cands = setup({"FIX-A": "verified"})
+        o = Orchestrator.__new__(Orchestrator)
+        o.state = s
+        s.candidates = list(cands.values())
+        s.proposals = [{"candidate_id": c} for c in cands]
+        s.approvals["FIX-B"] = {"status": "pending"}
+        s.approvals["FIX-C"] = {"status": "rejected"}
+        o.apply()
+        self.assertEqual(s.approvals["FIX-A"]["status"], "approved")
+        self.assertEqual(s.approvals["FIX-B"]["status"], "superseded")
+        self.assertEqual(s.approvals["FIX-C"]["status"], "rejected")
 
 
 if __name__ == "__main__":
