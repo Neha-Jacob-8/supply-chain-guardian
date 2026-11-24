@@ -1,12 +1,102 @@
-"""Guardian Security Report: report.json (machine-readable) + report.md (human-readable)."""
+"""Guardian Security Report: report.json (machine-readable) + report.md (human-readable) + report.pdf.
+
+Runs in series after validation / apply / auto-mitigation so the executive narrative
+accurately explains what was done, why it was needed, what attack/risk it prevents, and
+the exact validation proof.
+"""
 import json
 from collections import Counter
 from dataclasses import asdict
 
 from ..config import cache_ttl_seconds
+from .pdf import write_pdf
 
 
-def write(state):
+def _build_action_records(state):
+    """Build precise structured records of every validated / applied / auto-merged fix."""
+    props = {p["candidate_id"]: p for p in getattr(state, "proposals", [])}
+    applied = {a["candidate_id"]: a for a in getattr(state, "applied", [])}
+    records = []
+    for v in getattr(state, "validations", []):
+        cid = v["candidate_id"]
+        p = props.get(cid, {})
+        ap = applied.get(cid, {})
+        fids = p.get("finding_ids") or []
+        causes = []
+        for fid in fids[:6]:
+            f = state.by_id.get(fid)
+            if f:
+                causes.append(f"{f['rule_id']}: {f['title']}")
+        outcome = "Auto-Merged" if v.get("merged") else (ap.get("status") or v.get("verdict", "checked"))
+        records.append({
+            "candidate_id": cid,
+            "action": v.get("summary") or p.get("summary") or cid,
+            "verdict": v.get("verdict"),
+            "outcome": outcome,
+            "merged_files": v.get("merged_files") or ap.get("files") or [],
+            "root_causes": causes,
+            "prevents": p.get("expected_risk_reduction") or p.get("rationale") or "Mitigates targeted supply-chain risk.",
+            "test_kind": (v.get("test_info") or {}).get("kind"),
+        })
+    return records
+
+
+def generate_executive_narrative(state, llm=None):
+    """Generate a precise executive security narrative after validation/apply using the LLM (with deterministic fallback)."""
+    records = _build_action_records(state)
+    vuln_cnt = sum(1 for f in state.findings if f.get("category") == "vulnerability")
+    mal_cnt = sum(1 for f in state.findings if f.get("category") == "malicious")
+    ind_cnt = len(state.findings) - vuln_cnt - mal_cnt
+    verified_cnt = sum(1 for v in getattr(state, "validations", []) if v.get("verdict") == "verified")
+    merged_cnt = sum(1 for v in getattr(state, "validations", []) if v.get("merged"))
+
+    if llm is not None and (records or state.findings):
+        prompt = (
+            "Write a concise, executive-ready Security Remediation Summary in Markdown based ONLY on the verified facts below.\n"
+            "For each remediated/validated item, clearly state:\n"
+            "1. **What we did** (exact package/file change & validation outcome)\n"
+            "2. **Why it was needed** (exact CVE/rule/finding)\n"
+            "3. **What it prevents** (concrete security impact/attack prevented)\n"
+            "Do NOT invent any CVE IDs, package names, or results not listed below.\n\n"
+            f"Repository: {state.repo}\n"
+            f"Findings summary: {mal_cnt} malicious, {vuln_cnt} vulnerabilities, {ind_cnt} supply-chain indicators.\n"
+            f"Validated fixes: {verified_cnt} verified, {merged_cnt} auto-merged.\n"
+            f"Action records:\n{json.dumps(records[:15], indent=1)}\n"
+        )
+        for provider in (getattr(llm, "providers", None) or [llm]):
+            try:
+                r = provider.step(
+                    "You are a concise Principal Security Engineer writing an executive remediation brief. Be exact, factual, and brief.",
+                    [{"role": "user", "content": prompt}],
+                    [],
+                )
+                txt = (r.text or "").strip()
+                if txt and len(txt) > 40:
+                    return {"mode": f"llm:{provider.name}", "markdown": txt, "actions": records}
+            except Exception:
+                continue
+
+    # Deterministic structured fallback
+    lines = [
+        f"Guardian analysed `{state.repo}` across **{len(state.comps)}** components and identified "
+        f"**{mal_cnt}** malicious package(s), **{vuln_cnt}** vulnerability advisories, and **{ind_cnt}** supply-chain indicators."
+    ]
+    if records:
+        lines.append("")
+        for rec in records:
+            causes = "; ".join(rec["root_causes"][:3]) if rec["root_causes"] else "Supply-chain risk finding"
+            files_str = f" in `{', '.join(rec['merged_files'])}`" if rec["merged_files"] else ""
+            lines.append(
+                f"- **We did:** {rec['action']}{files_str} (**{rec['verdict']}** / {rec['outcome']}).  \n"
+                f"  **Due to:** {causes}.  \n"
+                f"  **Prevents:** {rec['prevents']}"
+            )
+    else:
+        lines.append("\nNo automated patches were executed yet; review the prioritized findings and proposals below.")
+    return {"mode": "rule-based (no LLM)", "markdown": "\n".join(lines), "actions": records}
+
+
+def write(state, llm=None):
     s = state
     comps = s.comps.values()
     vuln = [f for f in s.findings if f["category"] == "vulnerability"]
@@ -16,12 +106,19 @@ def write(state):
         for validation in s.validations
         for finding_id in (validation.get("comparison") or {}).get("resolved", [])
     }
+    for validation in s.validations:
+        if validation.get("verdict") == "verified" and validation.get("merged"):
+            p = next((x for x in s.proposals if x["candidate_id"] == validation["candidate_id"]), None)
+            if p:
+                validated_resolved.update(p.get("finding_ids") or [])
     remaining = [f for f in s.findings if f["finding_id"] not in validated_resolved]
     run_config = getattr(s, "run_config", {}) or {}
     baseline = getattr(s, "baseline_smoke", None)
+    exec_summary = generate_executive_narrative(s, llm=llm)
     data = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "repo": str(s.repo), "identity": getattr(s, "identity", {}), "llm_mode": s.llm_mode,
+        "executive_narrative": exec_summary,
         "inventory": {"components": len(s.comps), **Counter(c.relationship for c in comps),
                       **{f"scope_{k}": v for k, v in Counter(c.scope for c in comps).items()},
                       "projects": s.inventory.get("projects", []), "ecosystems": s.inventory.get("ecosystems", [])},
@@ -44,6 +141,7 @@ def write(state):
         },
         "cache_policy": {"offline": run_config.get("offline"), "ttl_seconds": cache_ttl_seconds()},
         "applied": getattr(s, "applied", []),
+        "pull_request": getattr(s, "pull_request", None),
         "lockfile_changes": s.changes, "coverage_gaps": s.gaps,
         "evidence_index": s.evidence,
         "remaining_risk": [
@@ -57,10 +155,11 @@ def write(state):
 
     L = [f"# Guardian Security Report", "", f"- Repository: `{s.repo}`",
          f"- Agents ran with: **{'LLM: ' + s.llm_mode if s.llm_mode != 'none' else 'rule-based fallback, no LLM'}** "
-         f"(per-agent mode is shown with each priority/investigation)",
+         f"(executive narrative: `{exec_summary['mode']}`)",
          f"- Components: {len(s.comps)} ({data['inventory'].get('direct', 0)} direct, {data['inventory'].get('transitive', 0)} transitive; "
          f"{data['inventory'].get('scope_prod', 0)} prod, {data['inventory'].get('scope_dev', 0)} dev)",
          f"- Findings: {len(vuln)} vulnerability advisories (verified, OSV) + {len(ind)} supply-chain indicators (rule-based)", ""]
+    L += ["## Executive Remediation Summary", "", exec_summary["markdown"], ""]
     if data["risk_summary"]:
         L += ["## Assessment", "", data["risk_summary"], ""]
     L += ["## Validation scope", "",
@@ -143,5 +242,7 @@ def write(state):
         "- Package-level reachability only (is the package imported), not function-level.",
         "- Vulnerabilities come from OSV; indicators are heuristics, not proof of compromise.",
         "- Every remediation needs human approval; nothing is merged or deployed automatically.", ""]
-    (s.out / "report.md").write_text("\n".join(L))
-    return ["report.json", "report.md"]
+    md_text = "\n".join(L)
+    (s.out / "report.md").write_text(md_text)
+    write_pdf(md_text, s.out / "report.pdf", title=f"Supply Chain Guardian Report - {s.repo.name}")
+    return ["report.json", "report.md", "report.pdf"]

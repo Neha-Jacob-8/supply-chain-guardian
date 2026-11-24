@@ -295,9 +295,20 @@ class AutoMitigateAndMergeTest(unittest.TestCase):
 
     def test_gemini_api_for_testing_env_key_priority(self):
         import os
-        with patch.dict(os.environ, {"GEMINI_API_KEYS": "main_key_1", "GEMINI_API_FOR_TESTING": "test_key_99"}, clear=False):
+        with patch.dict(os.environ, {"GEMINI_API_KEYS": "main_key_1", "GEMINI_API_FOR_TESTING": "test_key_99", "GEMINI_FOR_SANDBOX": "sbx_key_77"}, clear=False):
             self.assertEqual(gemini_keys(for_testing=True)[0], "test_key_99")
-            self.assertEqual(gemini_keys(for_testing=False)[0], "main_key_1")
+            self.assertEqual(gemini_keys(for_sandbox=True)[0], "sbx_key_77")
+            self.assertEqual(gemini_keys(for_testing=False, for_sandbox=False)[0], "main_key_1")
+
+    def test_sandbox_dockerfile_generation_when_missing(self):
+        from guardian.validation.auto_mitigate import _generate_sandbox_dockerfile
+        td = Path(tempfile.mkdtemp())
+        (td / "requirements.txt").write_text("flask==3.0.0\n")
+        (td / "app.py").write_text("import flask\n")
+        df_path, step = _generate_sandbox_dockerfile(td, "pypi", llm=None)
+        self.assertTrue(df_path.is_file())
+        self.assertEqual(step["name"], "generate_dockerfile")
+        self.assertIn("FROM python:", df_path.read_text())
 
 
 class MaliciousAndPhantomShadowTest(unittest.TestCase):
@@ -369,6 +380,102 @@ class HumanWarningBypassTest(unittest.TestCase):
         # Unwaive restores the warning
         self.assertTrue(unwaive_finding(repo, "SC11-abcdef1234", by="alice", signing_key="k1"))
         self.assertNotIn("SC11-abcdef1234", load_waivers(repo))
+
+
+class ReportPdfAndGitHubAppPRTest(unittest.TestCase):
+    def test_executive_report_and_pdf_export(self):
+        from guardian.reporting import write_report
+        repo = Path(tempfile.mkdtemp())
+        out = Path(tempfile.mkdtemp())
+        (repo / "requirements.txt").write_text("pillow==13.0.0\n")
+        st = RunState(repo, out)
+        st.comps = {"pkg:pypi/pillow@11.0.0": Component(
+            component_id="pkg:pypi/pillow@11.0.0", name="pillow", version="11.0.0", ecosystem="pypi", relationship="direct"
+        )}
+        st.set_findings([{
+            "finding_id": "CVE-2025-1:pkg:pypi/pillow@11.0.0",
+            "rule_id": "OSV", "category": "vulnerability", "severity": "HIGH",
+            "title": "Buffer overflow in pillow", "component_id": "pkg:pypi/pillow@11.0.0",
+            "advisory_id": "CVE-2025-1", "aliases": [], "evidence": {"source": "OSV"},
+        }])
+        st.risk = {"CVE-2025-1:pkg:pypi/pillow@11.0.0": {"score": 72, "severity": "HIGH", "factors": {}}}
+        st.proposals = [{
+            "candidate_id": "FIX-VULN-1", "finding_ids": ["CVE-2025-1:pkg:pypi/pillow@11.0.0"],
+            "summary": "Upgrade pillow 11.0.0 -> 13.0.0 (requirements.txt)",
+            "change_risk": "high", "rationale": "Closes buffer overflow CVE-2025-1",
+            "expected_risk_reduction": "Eliminates remote image parsing RCE risk.",
+        }]
+        st.approvals = {"FIX-VULN-1": {"status": "approved"}}
+        st.validations = [{
+            "candidate_id": "FIX-VULN-1", "summary": "Upgrade pillow 11.0.0 -> 13.0.0",
+            "verdict": "verified", "merged": True, "merged_files": ["requirements.txt"],
+            "steps": [{"name": "run_tests", "rc": 0, "detail": "smoke test passed"}],
+            "test_info": {"kind": "generated"},
+        }]
+        paths = write_report(st, llm=None)
+        self.assertIn("report.pdf", paths)
+        pdf_bytes = (out / "report.pdf").read_bytes()
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
+        md_text = (out / "report.md").read_text()
+        self.assertIn("## Executive Remediation Summary", md_text)
+        self.assertIn("Upgrade pillow", md_text)
+        rj = json.loads((out / "report.json").read_text())
+        self.assertIn("executive_narrative", rj)
+        self.assertEqual(len(rj["executive_narrative"]["actions"]), 1)
+
+    def test_github_app_jwt_and_pr_creation(self):
+        import subprocess
+        from guardian.remediation.github_pr import create_app_jwt, create_remediation_pr
+
+        td = Path(tempfile.mkdtemp())
+        pem = td / "test-app.pem"
+        # Generate a real ephemeral 2048-bit RSA key for testing RS256 JWT signing
+        subprocess.run(["openssl", "genrsa", "-out", str(pem), "2048"], check=True, capture_output=True)
+        jwt_tok = create_app_jwt("123456", pem)
+        self.assertEqual(len(jwt_tok.split(".")), 3)
+
+        repo = td / "repo"
+        out = td / "out"
+        repo.mkdir(); out.mkdir()
+        (repo / "requirements.txt").write_text("flask==3.0.0\n")
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/octocat/Hello-World.git"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"], check=True)
+        (repo / "requirements.txt").write_text("flask==3.1.0\n")
+        (out / "report.json").write_text(json.dumps({
+            "executive_narrative": {
+                "markdown": "Upgraded flask to 3.1.0",
+                "actions": [{"candidate_id": "FIX-VULN-1", "action": "Upgrade flask 3.0.0 -> 3.1.0", "verdict": "verified", "outcome": "Auto-Merged"}],
+            }
+        }))
+
+        def fake_gh(method, path, token, body=None):
+            if path == "/repos/octocat/Hello-World":
+                return 200, {"default_branch": "main"}
+            if path == "/repos/octocat/Hello-World/forks":
+                return 202, {"full_name": "guardian-bot/Hello-World", "owner": {"login": "guardian-bot"}}
+            if path == "/repos/octocat/Hello-World/pulls":
+                return 201, {"html_url": "https://github.com/octocat/Hello-World/pull/42", "number": 42}
+            return 200, {}
+
+        orig_git = __import__("guardian.remediation.github_pr", fromlist=["_git"])._git
+        def git_side_effect(r, *a, **kw):
+            if a and a[0] == "push":
+                return 0, "pushed"
+            return orig_git(r, *a, **kw)
+
+        with patch("guardian.remediation.github_pr.get_installation_token", return_value=("ghs_fake_tok", "999")), \
+                patch("guardian.remediation.github_pr._gh_request", side_effect=fake_gh), \
+                patch("guardian.remediation.github_pr.time.sleep"), \
+                patch("guardian.remediation.github_pr._git", side_effect=git_side_effect):
+            res = create_remediation_pr(repo, out, app_id="123456", pem_path=str(pem))
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["pr_number"], 42)
+        self.assertEqual(res["pr_url"], "https://github.com/octocat/Hello-World/pull/42")
+        self.assertTrue(res["branch"].startswith("guardian/deps/"))
+        self.assertEqual(res["fork"], "guardian-bot/Hello-World")
 
 
 if __name__ == "__main__":

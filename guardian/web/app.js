@@ -73,7 +73,12 @@ async function poll() {
     if (ev.length) { S.events.push(...ev); S.lastT = ev[ev.length - 1].t; renderEvents(); }
     if (st.error) banner(`Run failed: ${esc(st.error)}`);
     if (wasRunning && !st.running) { await loadAll(); if (!st.error) banner(''); }
-    if (st.running) { const last = S.events[S.events.length - 1]; banner(`Running: <b>${esc(last ? `${last.actor} · ${last.kind}` : st.phase || 'starting')}</b>`, 'info'); }
+    if (st.running) {
+      const last = S.events[S.events.length - 1];
+      const elapsed = st.elapsed_seconds != null ? ` · <code>${Math.round(st.elapsed_seconds)}s</code>` : '';
+      const stepHint = last ? `${last.actor} · ${last.kind}` : (st.phase || 'starting');
+      banner(`Running: <b>${esc(stepHint)}</b>${elapsed} <span class="muted">(live progress in Activity tab)</span>`, 'info');
+    }
   } catch (e) { banner(`Cannot reach the Guardian API (${esc(e.message)}). Start it with <code>guardian serve</code>.`); }
   clearTimeout(polling); polling = setTimeout(poll, S.status.running ? 1500 : 5000);
 }
@@ -488,7 +493,35 @@ function md(src) {
   }
   flush(); return out.join('');
 }
-async function renderReport() { try { $('#report').innerHTML = md(await get('/report.md')); } catch { $('#report').innerHTML = '<p class="muted">No report yet.</p>'; } }
+async function renderReport() {
+  try {
+    const [mdText, rj] = await Promise.all([get('/report.md'), get('/report.json').catch(() => null)]);
+    $('#report').innerHTML = md(mdText);
+    const pr = rj?.pull_request;
+    if (pr && pr.pr_url) {
+      $('#prBanner').hidden = false;
+      $('#prBanner').innerHTML = `<b>GitHub Pull Request Raised:</b> <a href="${esc(pr.pr_url)}" target="_blank" rel="noopener">${esc(pr.pr_url)}</a> · Branch <code>${esc(pr.branch)}</code> → <code>${esc(pr.upstream)}</code>`;
+      $('#prStatus').textContent = `PR #${pr.pr_number || ''} created`;
+    } else {
+      $('#prBanner').hidden = true;
+    }
+  } catch {
+    $('#report').innerHTML = '<p class="muted">No report yet.</p>';
+  }
+}
+$('#raisePrBtn')?.addEventListener('click', async () => {
+  const btn = $('#raisePrBtn');
+  btn.disabled = true; btn.textContent = 'Forking & Raising PR…';
+  try {
+    const res = await post('/report/pr', {});
+    banner(`Pull Request #${esc(res.pr_number)} created: <a href="${esc(res.pr_url)}" target="_blank" rel="noopener">${esc(res.pr_url)}</a>`, 'info');
+    await renderReport();
+  } catch (e) {
+    banner(`GitHub PR failed: ${esc(e.message)}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Raise GitHub PR (App)';
+  }
+});
 
 /* ---------------- coverage ---------------- */
 function renderCoverage() {

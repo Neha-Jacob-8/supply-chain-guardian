@@ -113,7 +113,16 @@
       <div class="tablewrap"><table class="tbl dense mono" id="events"></table></div>
     </section>
 
-    <section class="view" id="v-report"><div class="toolbar"><a class="btn" href="/api/report.json" target="_blank" rel="noopener">Download JSON</a></div><article id="report" class="md panel"></article></section>
+    <section class="view" id="v-report">
+      <div class="toolbar">
+        <button class="btn primary" id="raisePrBtn">Raise GitHub PR (App)</button>
+        <a class="btn" id="exportPdfBtn" href="/api/report.pdf" target="_blank" rel="noopener">Export PDF</a>
+        <a class="btn" href="/api/report.json" target="_blank" rel="noopener">Download JSON</a>
+        <span id="prStatus" class="muted" style="margin-left:auto"></span>
+      </div>
+      <div id="prBanner" class="note" hidden></div>
+      <article id="report" class="md panel"></article>
+    </section>
 
     <section class="view" id="v-coverage"><div class="panel"><h3>Coverage gaps</h3><p class="muted">What the Guardian could not resolve, and why. Reported instead of guessed.</p><div id="gaps"></div></div></section>
   </main>

@@ -261,7 +261,7 @@ class Orchestrator:
     def finish(self):
         from ..integrity import append_ledger_record
         self._stage("report")
-        paths = write_report(self.state)
+        paths = write_report(self.state, llm=self.llm)
         self.state.stage = "done"
         self.state.save()
         if (self.state.repo / ".guardian" / "ledger.jsonl").exists():
