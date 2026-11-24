@@ -196,6 +196,135 @@ def _generate_llm_or_fallback_test(state, cand, work_dir: Path, llm=None) -> dic
         }
 
 
+def _docker_available() -> bool:
+    if not shutil.which("docker"):
+        return False
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _generate_sandbox_dockerfile(work_dir: Path, eco: str, llm=None) -> tuple[Path, dict]:
+    """Use existing Dockerfile or generate a minimal, safe sandbox Dockerfile using GEMINI_FOR_SANDBOX (with fallback)."""
+    existing = work_dir / "Dockerfile"
+    if existing.is_file():
+        return existing, {
+            "name": "sandbox_dockerfile",
+            "rc": 0,
+            "detail": "Using repository's existing Dockerfile for Docker sandbox",
+            "log_tail": existing.read_text(errors="replace")[:2000],
+        }
+
+    files_list = sorted(
+        str(p.relative_to(work_dir))
+        for p in work_dir.rglob("*")
+        if p.is_file() and not {".git", "node_modules", ".venv", "venv", ".guardian_test_env"} & set(p.relative_to(work_dir).parts)
+    )[:40]
+
+    df_text = None
+    gen_mode = "deterministic-template"
+
+    sandbox_llm = llm
+    if os.environ.get("GEMINI_FOR_SANDBOX"):
+        try:
+            from ..agents.gemini import GeminiLLM, gemini_keys
+            sandbox_llm = GeminiLLM(keys=gemini_keys(for_sandbox=True))
+        except Exception:
+            pass
+
+    if sandbox_llm is not None:
+        prompt = (
+            f"Generate a minimal, secure, non-root Dockerfile for running unit/smoke tests on a `{eco}` project in an isolated sandbox.\n"
+            f"Repository files: {json.dumps(files_list)}\n"
+            "Rules:\n"
+            "- Use an official slim/alpine base image (e.g. python:3.11-slim or node:22-alpine).\n"
+            "- Set WORKDIR /app and COPY . /app.\n"
+            "- If requirements.txt exists, install with `pip install --no-cache-dir -r requirements.txt || true` (or npm ci --ignore-scripts).\n"
+            "- Output ONLY raw Dockerfile instructions, no markdown fences."
+        )
+        for provider in (getattr(sandbox_llm, "providers", None) or [sandbox_llm]):
+            try:
+                r = provider.step("You write minimal, safe sandbox Dockerfiles. Output raw Dockerfile text only.", [{"role": "user", "content": prompt}], [])
+                txt = (r.text or "").strip()
+                txt = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", txt).strip()
+                if txt and "FROM " in txt.upper():
+                    df_text = txt
+                    gen_mode = f"llm:{provider.name}"
+                    break
+            except Exception:
+                continue
+
+    if not df_text:
+        if eco == "npm":
+            df_text = (
+                "FROM node:22-alpine\n"
+                "WORKDIR /app\n"
+                "COPY . /app\n"
+                "RUN if [ -f package.json ]; then npm install --ignore-scripts --no-audit --no-fund || true; fi\n"
+                "USER node\n"
+            )
+        else:
+            df_text = (
+                "FROM python:3.11-slim\n"
+                "WORKDIR /app\n"
+                "COPY . /app\n"
+                "RUN pip install --no-cache-dir --quiet pytest || true\n"
+                "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir --quiet -r requirements.txt || true; fi\n"
+                "RUN useradd -m sandbox || true\n"
+                "USER sandbox\n"
+            )
+
+    df_path = work_dir / "Dockerfile.guardian-sandbox"
+    df_path.write_text(df_text, encoding="utf-8")
+    return df_path, {
+        "name": "generate_dockerfile",
+        "rc": 0,
+        "detail": f"Generated sandbox Dockerfile ({gen_mode})",
+        "log_tail": df_text,
+    }
+
+
+def _run_in_docker_sandbox(work_dir: Path, df_path: Path, exec_cmd: list[str], tag: str, state) -> tuple[list[dict], dict]:
+    """Build the sandbox Docker image and execute the test command inside the container."""
+    steps = []
+    state.log("auto_mitigate", "docker_build", {"image": tag, "dockerfile": df_path.name})
+    build_res = _run_cmd(["docker", "build", "-f", df_path.name, "-t", tag, "."], cwd=work_dir, timeout=300)
+    steps.append({
+        "name": "docker_build",
+        "rc": build_res["rc"],
+        "seconds": build_res["seconds"],
+        "detail": f"Built Docker sandbox image `{tag}` ({df_path.name}) -> exit {build_res['rc']}",
+        "log_tail": build_res["output"],
+    })
+    if build_res["rc"] != 0:
+        return steps, build_res
+
+    # Map host python/node binary path to container command
+    container_cmd = list(exec_cmd)
+    if container_cmd and ("python" in Path(container_cmd[0]).name):
+        container_cmd[0] = "python3"
+    elif container_cmd and Path(container_cmd[0]).name == "node":
+        container_cmd[0] = "node"
+
+    state.log("auto_mitigate", "docker_run", {"image": tag, "cmd": " ".join(container_cmd)})
+    run_res = _run_cmd(
+        ["docker", "run", "--rm", "--memory", "2g", "--network", "none", tag, *container_cmd],
+        cwd=work_dir,
+        timeout=120,
+    )
+    _run_cmd(["docker", "image", "rm", "-f", tag], cwd=work_dir, timeout=30)
+    steps.append({
+        "name": "run_tests_in_docker",
+        "rc": run_res["rc"],
+        "seconds": run_res["seconds"],
+        "detail": f"Executed `{' '.join(container_cmd)}` inside Docker sandbox -> exit {run_res['rc']}",
+        "log_tail": run_res["output"],
+    })
+    return steps, run_res
+
+
 def _prepare_test_environment(work_dir: Path, eco: str, test_info: dict, offline: bool = False) -> tuple[list[dict], list[str]]:
     """Create or provision an isolated test environment (.guardian_test_env / node_modules) in the sandbox
     so generated or existing tests have their testing library and dependencies available."""
@@ -300,19 +429,30 @@ def auto_mitigate_candidate(state, cand, llm=None, auto_merge=True, save_generat
             "detail": f"Found existing test suite: {', '.join(test_info['files'])}",
         })
 
-    # 3. Create isolated test environment & install needed test libraries, then execute test suite in sandbox
+    # 3. Run tests inside Docker sandbox (generating a Dockerfile via GEMINI_FOR_SANDBOX if none exists),
+    # or fall back to isolated .guardian_test_env if Docker daemon is not available.
     offline = bool((getattr(state, "run_config", None) or {}).get("offline", True))
-    env_steps, exec_cmd = _prepare_test_environment(work, test_info.get("ecosystem", "pypi"), test_info, offline=offline)
-    steps.extend(env_steps)
+    eco = test_info.get("ecosystem", "pypi")
+    use_docker = (not offline) and _docker_available()
 
-    run_res = _run_cmd(exec_cmd, cwd=work, timeout=90)
-    steps.append({
-        "name": "run_tests",
-        "rc": run_res["rc"],
-        "seconds": run_res["seconds"],
-        "detail": f"Executed `{run_res['cmd']}` -> exit {run_res['rc']}",
-        "log_tail": run_res["output"],
-    })
+    if use_docker:
+        df_path, df_step = _generate_sandbox_dockerfile(work, eco, llm=llm)
+        steps.append(df_step)
+        tag = f"guardian-sbx-{cid.lower()}"
+        d_steps, run_res = _run_in_docker_sandbox(work, df_path, test_info["command"], tag, state)
+        steps.extend(d_steps)
+    else:
+        env_steps, exec_cmd = _prepare_test_environment(work, eco, test_info, offline=offline)
+        steps.extend(env_steps)
+        state.log("auto_mitigate", "sandbox_run", {"cmd": " ".join(exec_cmd), "docker": False})
+        run_res = _run_cmd(exec_cmd, cwd=work, timeout=90)
+        steps.append({
+            "name": "run_tests",
+            "rc": run_res["rc"],
+            "seconds": run_res["seconds"],
+            "detail": f"Executed `{run_res['cmd']}` -> exit {run_res['rc']}",
+            "log_tail": run_res["output"],
+        })
 
     passed = run_res["rc"] == 0
     merged = False

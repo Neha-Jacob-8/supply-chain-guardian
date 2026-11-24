@@ -108,7 +108,9 @@ def create_app(out_dir="output"):
     def status():
         st = load("run_state.json", {})
         approvals = st.get("approvals", {})
+        elapsed = round(time.time() - job["started"], 1) if (running() and job.get("started")) else None
         return {"running": running(), "job": job["kind"], "phase": job.get("phase"), "error": job["error"],
+                "elapsed_seconds": elapsed,
                 "stage": st.get("stage"), "repo": st.get("repo"), "target": job.get("repo"), "llm_mode": st.get("llm_mode"),
                 "approvals": Counter(v["status"] for v in approvals.values())}
 

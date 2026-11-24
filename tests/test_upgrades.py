@@ -295,9 +295,20 @@ class AutoMitigateAndMergeTest(unittest.TestCase):
 
     def test_gemini_api_for_testing_env_key_priority(self):
         import os
-        with patch.dict(os.environ, {"GEMINI_API_KEYS": "main_key_1", "GEMINI_API_FOR_TESTING": "test_key_99"}, clear=False):
+        with patch.dict(os.environ, {"GEMINI_API_KEYS": "main_key_1", "GEMINI_API_FOR_TESTING": "test_key_99", "GEMINI_FOR_SANDBOX": "sbx_key_77"}, clear=False):
             self.assertEqual(gemini_keys(for_testing=True)[0], "test_key_99")
-            self.assertEqual(gemini_keys(for_testing=False)[0], "main_key_1")
+            self.assertEqual(gemini_keys(for_sandbox=True)[0], "sbx_key_77")
+            self.assertEqual(gemini_keys(for_testing=False, for_sandbox=False)[0], "main_key_1")
+
+    def test_sandbox_dockerfile_generation_when_missing(self):
+        from guardian.validation.auto_mitigate import _generate_sandbox_dockerfile
+        td = Path(tempfile.mkdtemp())
+        (td / "requirements.txt").write_text("flask==3.0.0\n")
+        (td / "app.py").write_text("import flask\n")
+        df_path, step = _generate_sandbox_dockerfile(td, "pypi", llm=None)
+        self.assertTrue(df_path.is_file())
+        self.assertEqual(step["name"], "generate_dockerfile")
+        self.assertIn("FROM python:", df_path.read_text())
 
 
 class MaliciousAndPhantomShadowTest(unittest.TestCase):
