@@ -1,7 +1,9 @@
 """Apply verified fixes to the target repository (after human approval and independent validation).
 
-Only fixes whose validation verdict is `verified` are applied, and exactly the files the validator
-checked (the candidate's changes plus any lockfile it regenerated in the sandbox). In a git repository
+Applied: fixes whose validation verdict is `verified`, and `partial` fixes whose only gap is missing runtime evidence
+(no trusted runtime profile for the repository) while the static rescan was clean: every targeted finding resolved and
+nothing new at high/critical severity. Failed fixes, runtime failures and incomplete fixes are never applied. Exactly
+the files the validator checked are written (the candidate's changes plus any lockfile it regenerated in the sandbox). In a git repository
 the changes go onto a new local branch `guardian/remediation-<time>`, one commit per fix, with git hooks
 disabled. Nothing is pushed. Several fixes to the same file are combined with a three-way merge; a fix
 that conflicts is reported and left out instead of overwriting another fix.
@@ -13,6 +15,17 @@ from pathlib import Path
 
 GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"}
 AUTHOR = ["-c", "user.name=Supply Chain Guardian", "-c", "user.email=guardian@localhost", "-c", "core.hooksPath=/dev/null"]
+
+
+def eligible(v):
+    """'verified', 'static' (clean rescan, no runtime check available) or None (do not apply)."""
+    if v.get("verdict") == "verified":
+        return "verified"
+    c = v.get("comparison") or {}
+    if (v.get("verdict") == "partial" and c.get("targets") and not c.get("remaining") and not c.get("introduced_high")
+            and (c.get("smoke") or {}).get("after_ok") is None):
+        return "static"
+    return None
 
 
 def _git(repo, *args):
@@ -58,10 +71,10 @@ def _merge(current, base, new):
 
 
 def apply_verified(state, cands_by_id):
-    """Apply every verified, not yet applied fix. Returns the new apply records."""
+    """Apply every eligible, not yet applied fix. Returns the new apply records."""
     repo = Path(state.repo)
     done = {a["candidate_id"] for a in state.applied if a["status"] == "applied"}
-    todo = [v for v in state.validations if v["verdict"] == "verified" and v["candidate_id"] not in done
+    todo = [v for v in state.validations if eligible(v) and v["candidate_id"] not in done
             and v["candidate_id"] in cands_by_id]
     if not todo:
         return []
@@ -94,6 +107,9 @@ def apply_verified(state, cands_by_id):
     for v in todo:
         cid = v["candidate_id"]
         cand = cands_by_id[cid]
+        basis = ("verified" if eligible(v) == "verified" else
+                 "partial: static rescan only (no trusted runtime check for this repository); all targeted findings "
+                 "resolved, no new high/critical findings")
         files = validated_files(cand, state.out / "validation" / cid, baseline)
         merged, conflict = {}, None
         for path, (old, new, strict) in files.items():
@@ -105,19 +121,19 @@ def apply_verified(state, cands_by_id):
                 break
             merged[path] = text
         if conflict:
-            rec = {"candidate_id": cid, "summary": cand["summary"], "status": "conflict", "files": [],
+            rec = {"candidate_id": cid, "summary": cand["summary"], "status": "conflict", "files": [], "validation": basis,
                    "detail": f"{conflict} conflicts with a fix applied earlier; re-run the analysis to rebuild this fix"}
         else:
             for path, text in merged.items():
                 (repo / path).write_text(text)
             rec = {"candidate_id": cid, "summary": cand["summary"], "status": "applied", "files": sorted(merged),
-                   "branch": branch, "commit": None,
+                   "branch": branch, "commit": None, "validation": basis,
                    "detail": "applied to the working tree" + (f" on local branch {branch}" if branch else " (not a git repository)")}
             if git:
                 _git(repo, "add", "--", *merged)
                 msg = (f"Guardian fix: {cand['summary']}\n\nCandidate: {cid}\nCloses: {', '.join(cand['closes'][:20])}\n"
                        f"Approved by: {state.approvals.get(cid, {}).get('by', 'human reviewer')}\n"
-                       f"Validation: {v['verdict']} (independent validation agent)\nRollback: {cand['rollback']}")
+                       f"Validation: {basis} (independent validation agent)\nRollback: {cand['rollback']}")
                 rc, out = _git(repo, "commit", "--no-verify", "-m", msg, "--", *merged)
                 if rc == 0:
                     rec["commit"] = _git(repo, "rev-parse", "--short", "HEAD")[1]
