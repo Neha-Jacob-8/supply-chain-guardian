@@ -50,7 +50,43 @@ def main():
     sv = sub.add_parser("serve", help="HTTP API for the dashboard (needs the [api] extra)")
     sv.add_argument("--out", default="output"); sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
+    sm = sub.add_parser("simulate", help="Interactive or direct attack simulation on targets/<repo>")
+    sm.add_argument("target", nargs="?", help="Target repository path (optional; interactive picker if omitted)")
+    sm.add_argument("scenario", nargs="?", choices=["shadow", "merkle-tamper", "dev-edit", "typosquat", "provenance", "all", "reset"])
+    sm.add_argument("--out", default="output")
     a = ap.parse_args()
+    if a.cmd == "simulate":
+        from scripts import simulate_attacks as sim
+        targets = sorted(str(p) for p in Path("targets").iterdir() if p.is_dir()) if Path("targets").is_dir() else []
+        target = a.target
+        if not target:
+            if not targets:
+                print("No targets/* directories found. Pass a repo path: guardian simulate <repo> <scenario>")
+                return 1
+            print("Select target repository:")
+            for idx, t in enumerate(targets, 1):
+                print(f"  {idx}) {t}")
+            choice = input(f"Repo [1-{len(targets)}]: ").strip() or "1"
+            target = targets[int(choice) - 1]
+        scenarios = ["shadow", "merkle-tamper", "dev-edit", "typosquat", "provenance", "all", "reset"]
+        scenario = a.scenario
+        if not scenario:
+            print("Select simulation scenario:")
+            for idx, sc in enumerate(scenarios, 1):
+                print(f"  {idx}) {sc}")
+            choice = input(f"Scenario [1-{len(scenarios)}]: ").strip() or "1"
+            scenario = scenarios[int(choice) - 1]
+        repo_p, out_p = Path(target), Path(a.out)
+        sim._ensure_target(repo_p)
+        if scenario == "all":
+            sim.sim_shadow(repo_p, out_p); sim.sim_merkle_tamper(repo_p); sim.sim_typosquat(repo_p); sim.sim_provenance(repo_p, out_p)
+        elif scenario == "shadow": sim.sim_shadow(repo_p, out_p)
+        elif scenario == "merkle-tamper": sim.sim_merkle_tamper(repo_p)
+        elif scenario == "dev-edit": sim.sim_dev_edit(repo_p)
+        elif scenario == "typosquat": sim.sim_typosquat(repo_p)
+        elif scenario == "provenance": sim.sim_provenance(repo_p, out_p)
+        elif scenario == "reset": sim.sim_reset(repo_p)
+        return
     if a.cmd == "serve":
         from .api import serve
         return serve(a.out, a.host, a.port)

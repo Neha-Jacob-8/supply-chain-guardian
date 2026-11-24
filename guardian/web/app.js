@@ -144,13 +144,31 @@ function renderOverview() {
     const baseChip = ig.has_baseline ? chip(ig.baseline_ok ? 'Merkle Baseline OK' : `Merkle Tamper (${(ig.anomalies || []).length})`, ig.baseline_ok ? 'v-verified' : 'v-failed') : chip('No Merkle baseline yet', 'ghost');
     const ledChip = ig.has_ledger ? chip(ig.ledger_ok ? 'Hash-Chained Ledger OK' : 'Ledger Chain Broken', ig.ledger_ok ? 'v-verified' : 'v-failed') : chip('No Ledger yet', 'ghost');
     $('#integrityBox').innerHTML = `${baseChip} ${ledChip} <span class="muted" style="font-size:12px">${esc(ig.ledger_message || '')}</span>
-      <input id="signKeyInput" type="password" placeholder="Signing passphrase (or uses .env)" style="margin-left:auto;max-width:220px;padding:4px 8px;font-size:12px">
-      <button class="btn" id="signBaselineBtn">Sign Merkle Baseline</button>`;
+      <input id="signKeyInput" type="password" placeholder="Signing passphrase (or uses .env)" style="margin-left:auto;max-width:200px;padding:4px 8px;font-size:12px">
+      <button class="btn" id="signBaselineBtn">Sign Merkle Baseline</button>
+      <select id="simScenario" aria-label="Simulate attack scenario" style="padding:4px 8px;font-size:12px">
+        <option value="shadow">Attack: Shadow &amp; Malicious Dep</option>
+        <option value="merkle-tamper">Attack: Merkle Code Tamper (IT1)</option>
+        <option value="typosquat">Attack: Typosquat Package (SC9)</option>
+        <option value="provenance">Attack: 404 / New Release (SC10/11)</option>
+        <option value="dev-edit">Edit: Legitimate Dev Edit</option>
+        <option value="all">Attack: Run All Scenarios</option>
+        <option value="reset">Reset: Restore Clean Git HEAD</option>
+      </select>
+      <button class="btn" id="simRunBtn">Simulate</button>`;
     $('#signBaselineBtn')?.addEventListener('click', async () => {
       try {
         const key = $('#signKeyInput')?.value.trim() || null;
         const res = await post('/integrity/baseline', { key, signer: 'developer (dashboard)' });
         banner(`Signed 4096B Merkle baseline (${res.files} files, HMAC ${String(res.hmac || '').slice(0, 14)}…)`, 'info');
+        await loadAll();
+      } catch (e) { banner(esc(e.message)); }
+    });
+    $('#simRunBtn')?.addEventListener('click', async () => {
+      try {
+        const scenario = $('#simScenario')?.value || 'shadow';
+        const res = await post('/integrity/simulate', { scenario });
+        banner(`Simulation "${res.scenario}" applied to ${res.repo}. Click Analyse to scan or Sign Merkle Baseline to bless.`, 'info');
         await loadAll();
       } catch (e) { banner(esc(e.message)); }
     });

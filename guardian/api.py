@@ -53,6 +53,11 @@ class BaselineSignRequest(BaseModel):
     signer: str = "developer (dashboard)"
 
 
+class SimulateAttackRequest(BaseModel):
+    scenario: str                     # shadow | merkle-tamper | dev-edit | typosquat | provenance | all | reset
+    repo: str | None = None
+
+
 class WaiveFindingRequest(BaseModel):
     reason: str = "Verified safe / accepted risk by human reviewer"
     action: str = "waive"             # waive | unwaive
@@ -267,6 +272,30 @@ def create_app(out_dir="output"):
             raise HTTPException(400, "No active repository to baseline")
         doc = create_baseline(repo, signing_key=req.key, signer=req.signer)
         return {"ok": True, "files": len(doc.get("files", {})), "hmac": doc.get("hmac"), "created_at": doc.get("created_at")}
+
+    @app.post("/api/integrity/simulate")
+    def simulate_attack(req: SimulateAttackRequest):
+        st = load("run_state.json", {})
+        repo_path = Path(req.repo or st.get("repo") or "")
+        if not repo_path or not repo_path.is_dir():
+            raise HTTPException(400, "No active repository loaded to simulate on")
+        from scripts import simulate_attacks as sim
+        actions = {
+            "shadow": lambda: sim.sim_shadow(repo_path, out),
+            "merkle-tamper": lambda: sim.sim_merkle_tamper(repo_path),
+            "dev-edit": lambda: sim.sim_dev_edit(repo_path),
+            "typosquat": lambda: sim.sim_typosquat(repo_path),
+            "provenance": lambda: sim.sim_provenance(repo_path, out),
+            "reset": lambda: sim.sim_reset(repo_path),
+        }
+        if req.scenario == "all":
+            for k in ("shadow", "merkle-tamper", "typosquat", "provenance"):
+                actions[k]()
+        elif req.scenario in actions:
+            actions[req.scenario]()
+        else:
+            raise HTTPException(400, f"Unknown simulation scenario: {req.scenario}")
+        return {"ok": True, "scenario": req.scenario, "repo": str(repo_path)}
 
     # ---------- reads ----------
 
