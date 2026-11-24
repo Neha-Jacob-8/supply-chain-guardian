@@ -104,6 +104,17 @@ not `verified`. Compose invocation supports either the `docker-compose` v2 plugi
 profile installs development dependencies with `--ignore-scripts` inside the running container before executing its
 unit command, because the application image is intentionally production-only.
 
+## Applying verified fixes
+
+After validation the orchestrator's **apply** stage (`guardian/remediation/apply.py`) writes approved fixes that passed
+validation to the target repository, exactly as validated (the candidate's files plus the lockfile regenerated in the
+sandbox). In a git repository it creates a local branch `guardian/remediation-<time>` and makes one commit per fix
+(message: candidate, closed findings, approver, verdict, rollback) with git hooks disabled; it never pushes. Several
+fixes to one file are combined with a three-way merge (`git merge-file`); a fix that conflicts, or a regenerated
+lockfile that no longer matches the repository, is reported as `conflict` and left out. Files with uncommitted local
+changes are never touched (`skipped`). The result is recorded in `run_state.json` (`applied`), the report and
+`output/remediation.patch` (also served at `/api/remediation.patch`).
+
 ## Report schema
 
 `report.json` has schema version `1.0` and includes the identity, run configuration/cache policy, complete inventory,

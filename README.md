@@ -43,6 +43,7 @@ validation remains partial),
 | 4 Defense agent (Blue Team) | LLM + read-only tools | fix proposals chosen from computed candidates; patch-less fixes escalate to a human |
 | Approval gate | human | approve / reject each fix (dashboard or CLI) |
 | 5 Validation agent | deterministic | patch a copy, regenerate lockfile safely, rescan, run only a trusted profile's tests/smoke checks → verified / partial / failed |
+| Apply | code | verified fixes only: written to the repository on a local branch `guardian/remediation-<time>`, one commit per fix (never pushed); `remediation.patch` |
 | Report | code | `report.md` + `report.json`, audit trail in `events.jsonl` |
 
 Details: [docs/requirements.md](docs/requirements.md) · [docs/implementation.md](docs/implementation.md) ·
@@ -86,7 +87,8 @@ labelled rule-based fallback, so the pipeline always completes. Keys are sent on
 | `sbom.cdx.json` | CycloneDX 1.5 SBOM with hashes, sources and the dependency tree |
 | `graph.json` | network nodes (repo, projects, packages) and edges |
 | `findings.json` | vulnerabilities (verified, OSV) and indicators (rule-based), each with evidence and a risk breakdown |
-| `run_state.json`, `events.jsonl`, `evidence/` | agent outputs, approvals, verdicts; audit trail; cited evidence |
+| `run_state.json`, `events.jsonl`, `evidence/` | agent outputs, approvals, verdicts, applied fixes; audit trail; cited evidence |
+| `remediation.patch` | the applied fixes as `git format-patch` output, ready for a pull request |
 | `report.md` / `report.json` | Guardian Security Report |
 
 ## Repository layout
@@ -124,7 +126,9 @@ Only public `github.com` repositories are cloned, with git hooks disabled and no
 never runs on the host: lockfile regeneration uses `--ignore-scripts` and runs in Docker as a non-root user.
 Unknown repositories never execute arbitrary Dockerfiles/Compose; runtime checks require an allowlisted remote
 identity and pass a host-escape policy first. Repository secrets are redacted before anything reaches an LLM.
-Nothing is merged, pushed or deployed automatically.
+A fix reaches the repository only after human
+approval and a `verified` validation, and then only as a local branch commit (git hooks disabled); nothing is merged,
+pushed or deployed automatically.
 
 ## Known limitations
 
