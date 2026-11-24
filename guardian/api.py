@@ -53,6 +53,12 @@ class BaselineSignRequest(BaseModel):
     signer: str = "developer (dashboard)"
 
 
+class WaiveFindingRequest(BaseModel):
+    reason: str = "Verified safe / accepted risk by human reviewer"
+    action: str = "waive"             # waive | unwaive
+    by: str = "human reviewer (dashboard)"
+
+
 def create_app(out_dir="output"):
     out = Path(out_dir)
     app = FastAPI(title="Supply Chain Guardian API", version="0.2.0")
@@ -305,6 +311,31 @@ def create_app(out_dir="output"):
             if f["finding_id"] == finding_id:
                 return f
         raise HTTPException(404, "unknown finding")
+
+    @app.post("/api/findings/{finding_id:path}/waive")
+    def waive(finding_id: str, req: WaiveFindingRequest):
+        from .integrity import unwaive_finding, waive_finding
+        st = load("run_state.json", {})
+        repo = st.get("repo") or load("inventory.json", {}).get("repo")
+        if not repo or not Path(repo).is_dir():
+            raise HTTPException(400, "No active repository")
+        fs = load("findings.json")
+        target = next((f for f in fs if f["finding_id"] == finding_id), None)
+        if target is None:
+            raise HTTPException(404, "unknown finding")
+        if req.action == "unwaive":
+            unwaive_finding(repo, finding_id, by=req.by)
+            target.pop("waived", None)
+            target.pop("waiver", None)
+        else:
+            w = waive_finding(repo, finding_id, reason=req.reason, by=req.by)
+            target["waived"] = True
+            target["waiver"] = w
+        (out / "findings.json").write_text(json.dumps(fs, indent=2))
+        with open(out / "events.jsonl", "a") as ev:
+            ev.write(json.dumps({"t": time.time(), "stage": st.get("stage", "done"), "actor": "human",
+                                 "kind": "waive_finding", "detail": {"finding_id": finding_id, "action": req.action, "reason": req.reason}}) + "\n")
+        return target
 
     @app.get("/api/coverage")
     def coverage():

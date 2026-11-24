@@ -324,7 +324,82 @@ def run_watch(
     return findings
 
 
-# ---------- Tamper-Evident Hash-Chained Audit Ledger ----------
+# ---------- Tamper-Evident Hash-Chained Audit Ledger & Human Warning Bypass Policy ----------
+
+def _policy_path(repo: str | Path) -> Path:
+    return _guardian_dir(repo) / "policy.json"
+
+
+def load_waivers(repo: str | Path) -> dict:
+    """Return {finding_id_or_rule_or_purl: {reason, by, at, ledger_hash}} from `.guardian/policy.json`."""
+    p = _policy_path(repo)
+    if not p.exists():
+        return {}
+    try:
+        return (json.loads(p.read_text(encoding="utf-8")) or {}).get("waivers", {})
+    except Exception:
+        return {}
+
+
+def waive_finding(
+    repo: str | Path,
+    target_id: str,
+    reason: str,
+    by: str = "human reviewer",
+    signing_key: str | bytes | None = None,
+) -> dict:
+    """Record a human warning bypass / risk acceptance in `.guardian/policy.json` and log to the tamper-evident ledger."""
+    repo_p = Path(repo)
+    p = _policy_path(repo_p)
+    doc = {"waivers": load_waivers(repo_p)}
+    ts = datetime.now(timezone.utc).isoformat()
+    ledger_hash = append_ledger_record(
+        repo_p,
+        {
+            "event": "finding_waived",
+            "target_id": target_id,
+            "reason": reason,
+            "by": by,
+            "timestamp": ts,
+        },
+        signing_key=signing_key,
+    )
+    entry = {"target_id": target_id, "status": "waived", "reason": reason, "by": by, "at": ts, "ledger_hash": ledger_hash}
+    doc["waivers"][target_id] = entry
+    p.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    return entry
+
+
+def unwaive_finding(repo: str | Path, target_id: str, by: str = "human reviewer", signing_key: str | bytes | None = None) -> bool:
+    repo_p = Path(repo)
+    p = _policy_path(repo_p)
+    waivers = load_waivers(repo_p)
+    if target_id not in waivers:
+        return False
+    del waivers[target_id]
+    p.write_text(json.dumps({"waivers": waivers}, indent=2), encoding="utf-8")
+    append_ledger_record(
+        repo_p,
+        {"event": "finding_unwaived", "target_id": target_id, "by": by, "timestamp": datetime.now(timezone.utc).isoformat()},
+        signing_key=signing_key,
+    )
+    return True
+
+
+def apply_waivers(repo: str | Path, findings: list[dict]) -> list[dict]:
+    """Annotate findings that have been bypassed/waived by a human reviewer in `.guardian/policy.json`."""
+    waivers = load_waivers(repo)
+    if not waivers:
+        return findings
+    for f in findings:
+        fid = f.get("finding_id", "")
+        cid = f.get("component_id") or ""
+        w = waivers.get(fid) or (waivers.get(cid) if cid else None)
+        if w:
+            f["waived"] = True
+            f["waiver"] = w
+    return findings
+
 
 def _ledger_path(repo: str | Path) -> Path:
     repo_p = Path(repo)

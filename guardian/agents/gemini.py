@@ -23,9 +23,14 @@ ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:gene
 DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
 
 
-def gemini_keys():
-    raw = [os.environ.get("GEMINI_API_KEYS", ""), os.environ.get("GEMINI_API_KEY", "")]
+def gemini_keys(for_testing=False):
+    raw = []
+    if for_testing:
+        raw += [os.environ.get("GEMINI_API_FOR_TESTING", ""), os.environ.get("GEMINI_TEST_API_KEY", "")]
+    raw += [os.environ.get("GEMINI_API_KEYS", ""), os.environ.get("GEMINI_API_KEY", "")]
     raw += [os.environ.get(f"GEMINI_API_KEY_{i}", "") for i in range(1, 10)]
+    if not for_testing:
+        raw += [os.environ.get("GEMINI_API_FOR_TESTING", ""), os.environ.get("GEMINI_TEST_API_KEY", "")]
     keys = []
     for chunk in raw:
         for k in chunk.split(","):

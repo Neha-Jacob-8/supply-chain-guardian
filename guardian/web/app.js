@@ -321,8 +321,8 @@ function renderFindings() {
   const c = $('#fCat').value, sv = $('#fSev').value, q = $('#fQ').value.toLowerCase();
   const fs = S.findings.filter(f => (!c || f.category === c) && (!sv || f.risk?.severity === sv) && (!q || `${f.title} ${f.rule_id} ${f.component_id || ''}`.toLowerCase().includes(q)));
   $('#fCount').textContent = `${fs.length.toLocaleString()} findings`;
-  $('#fList').innerHTML = fs.slice(0, 600).map(f => `<div class="fitem sev-${f.risk?.severity || 'UNKNOWN'} ${S.selFinding === f.finding_id ? 'on' : ''}" data-f="${esc(f.finding_id)}">
-      <div class="t">${esc(f.title)}</div><div class="m"><span class="ev-${esc(f.evidence_class)}">${esc(f.evidence_class === 'verified' ? 'VERIFIED' : 'INDICATOR')}</span>
+  $('#fList').innerHTML = fs.slice(0, 600).map(f => `<div class="fitem sev-${f.waived ? 'LOW' : (f.risk?.severity || 'UNKNOWN')} ${S.selFinding === f.finding_id ? 'on' : ''}" style="${f.waived ? 'opacity:0.65' : ''}" data-f="${esc(f.finding_id)}">
+      <div class="t">${f.waived ? '[BYPASSED] ' : ''}${esc(f.title)}</div><div class="m"><span class="ev-${esc(f.evidence_class)}">${esc(f.evidence_class === 'verified' ? 'VERIFIED' : 'INDICATOR')}</span>
       <span>${esc(f.rule_id)}</span><span>${esc(short(f.component_id) || f.evidence?.path || '')}</span><span>risk ${f.risk?.score ?? '–'}</span></div></div>`).join('') || '<div class="empty">No findings match.</div>';
   $$('#fList .fitem').forEach(el => el.addEventListener('click', () => selectFinding(el.dataset.f)));
 }
@@ -332,8 +332,15 @@ function selectFinding(id) {
   const f = S.findings.find(x => x.finding_id === id); if (!f) return;
   const r = f.risk || {}, fac = Object.entries(r.factors || {}), pos = fac.filter(([, v]) => v.points > 0), sum = pos.reduce((a, [, v]) => a + v.points, 0) || 1;
   const ev = f.evidence || {};
-  $('#fDetail').innerHTML = `<div class="row2"><span class="ev-${esc(f.evidence_class)} chip ghost">${f.evidence_class === 'verified' ? 'Verified · OSV' : 'Indicator · rule ' + esc(f.rule_id)}</span>${sevChip(r.severity)}<span class="chip ghost">${esc(f.category)}</span></div>
+  const w = f.waiver;
+  $('#fDetail').innerHTML = `<div class="row2"><span class="ev-${esc(f.evidence_class)} chip ghost">${f.evidence_class === 'verified' ? 'Verified · OSV' : 'Indicator · rule ' + esc(f.rule_id)}</span>${sevChip(r.severity)}<span class="chip ghost">${esc(f.category)}</span>${f.waived ? chip('Bypassed by Human', 'v-verified') : ''}</div>
     <h4 style="font-size:17px;margin:4px 0 14px">${esc(f.title)}</h4>
+    ${f.waived && w ? `<div class="note" style="margin-bottom:12px"><b>Human Bypass Active:</b> ${esc(w.reason)} <span class="muted">(${esc(w.by)} · ledger <code>${esc((w.ledger_hash || '').slice(0, 12))}</code>)</span>
+      <button class="btn" id="unwaiveBtn" style="margin-left:10px">Restore Warning</button></div>` : `
+      <div class="row2" style="margin-bottom:12px;padding:8px;border:1px solid var(--border);border-radius:6px">
+        <input id="waiveReason" placeholder="Reason to bypass/accept this warning after reviewing detail…" style="flex:1;padding:4px 8px;font-size:12px">
+        <button class="btn" id="waiveBtn">Bypass / Dismiss Warning</button>
+      </div>`}
     <div style="display:flex;gap:28px;align-items:flex-end"><div><div class="score">${r.score ?? '–'}</div><span class="muted" style="font-size:11px">RISK SCORE (FORMULA)</span></div>
       <div><span class="meter"><i style="width:${(r.confidence || 0) * 100}%"></i></span> <span class="muted" style="font-size:12px">confidence ${Math.round((r.confidence || 0) * 100)}%</span></div></div>
     <div class="factors">${pos.map(([k, v], i) => `<i title="${esc(k)}: +${v.points} (${esc(v.why)})" style="width:${v.points / sum * 100}%;background:var(${FACTOR_COLORS[i % 6]})"></i>`).join('')}</div>
@@ -349,6 +356,23 @@ function selectFinding(id) {
       ${ev.sha256 ? `<dt>SHA-256</dt><dd class="mono" style="font-size:11px">${esc(ev.sha256)}</dd>` : ''}</dl>
     ${ev.excerpt ? `<pre class="ev">${esc(ev.excerpt)}</pre>` : ''}`;
   $('#fDetail [data-net]')?.addEventListener('click', e => { e.preventDefault(); focusNode(f.component_id); });
+  $('#waiveBtn')?.addEventListener('click', async () => {
+    const reason = $('#waiveReason')?.value.trim() || 'Verified safe / accepted risk after inspecting finding detail';
+    try {
+      const updated = await post(`/findings/${encodeURIComponent(f.finding_id)}/waive`, { reason, action: 'waive' });
+      Object.assign(f, updated);
+      banner(`Bypassed warning ${esc(f.finding_id)} (recorded in tamper-evident ledger)`, 'info');
+      renderFindings(); selectFinding(f.finding_id);
+    } catch (e) { banner(esc(e.message)); }
+  });
+  $('#unwaiveBtn')?.addEventListener('click', async () => {
+    try {
+      await post(`/findings/${encodeURIComponent(f.finding_id)}/waive`, { action: 'unwaive' });
+      delete f.waived; delete f.waiver;
+      banner(`Restored warning ${esc(f.finding_id)}`, 'info');
+      renderFindings(); selectFinding(f.finding_id);
+    } catch (e) { banner(esc(e.message)); }
+  });
 }
 
 /* ---------------- agents ---------------- */
@@ -420,11 +444,12 @@ function renderValidation() {
     const ti = v.test_info;
     return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || v.validated_by || '')}</span></div><div class="row2">${v.merged ? chip('Auto-Merged', 'v-verified') : ''}${chip(v.verdict, 'v-' + v.verdict)}</div></div>
       <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
-          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' || s.name === 'run_tests' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' || s.name === 'run_tests' || s.name === 'generate_smoke_test' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>
           <div><span>Targets resolved</span><b>${(c.resolved || []).length}/${c.targets}</b></div><div><span>Newly introduced</span><b>${c.introduced_count}</b> ${(c.introduced_high || []).length ? chip(`${c.introduced_high.length} high`, 'sev-HIGH') : ''}</div>
           <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>`
-          : ti ? `<div class="nums"><div><span>Test source</span><b>${esc(ti.kind)}</b></div><div><span>Generator</span><b>${esc(ti.generator || 'existing')}</b></div><div><span>Files</span><b class="mono">${esc((ti.files || []).join(', '))}</b></div><div><span>Auto-merged</span><b>${v.merged ? 'yes' : 'no'}</b></div></div>`
+          : ti ? `<div class="nums"><div><span>Test source</span><b>${esc(ti.kind)}</b></div><div><span>Generator</span><b>${esc(ti.generator || 'existing')}</b></div><div><span>Test file</span><b class="mono">${esc((ti.files || []).join(', '))}</b></div><div><span>Auto-merged</span><b>${v.merged ? 'yes (' + (v.merged_files || []).join(', ') + ')' : 'no'}</b></div></div>
+            ${ti.code ? `<h3 class="mt">Generated Smoke Test</h3><pre class="ev">${esc(ti.code)}</pre>` : ''}`
           : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
   }).join('') || '<div class="empty">No validations yet. Approve fixes under Remediation, then run independent validation.</div>';
 }

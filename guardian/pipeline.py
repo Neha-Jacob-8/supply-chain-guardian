@@ -30,7 +30,9 @@ def discover(repo, out, offline=False, history=20, no_vulns=False):
             (out / "coverage_gaps.json").write_text(json.dumps(inv["gaps"], indent=2))
     indicators, changes = run_detectors(repo, inv, comps, history, cache_dir=out / "cache", offline=offline)
     findings += indicators
-    findings.sort(key=lambda f: (-SEV_RANK.get(f["severity"], 0), -(f.get("cvss") or 0)))
+    from .integrity import apply_waivers
+    apply_waivers(repo, findings)
+    findings.sort(key=lambda f: (bool(f.get("waived")), -SEV_RANK.get(f["severity"], 0), -(f.get("cvss") or 0)))
     write_outputs(out, inv, comps, findings, changes)
     return inv, comps, findings, changes
 

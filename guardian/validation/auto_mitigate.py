@@ -99,7 +99,16 @@ def _generate_llm_or_fallback_test(state, cand, work_dir: Path, llm=None) -> dic
     generated_code = None
     generator_mode = "deterministic-template"
 
-    if llm is not None:
+    # Prefer dedicated GEMINI_API_FOR_TESTING key if configured in environment/.env
+    test_llm = llm
+    if os.environ.get("GEMINI_API_FOR_TESTING"):
+        try:
+            from ..agents.gemini import GeminiLLM, gemini_keys
+            test_llm = GeminiLLM(keys=gemini_keys(for_testing=True))
+        except Exception:
+            pass
+
+    if test_llm is not None:
         prompt = (
             f"Generate a minimal, self-contained {'Python unittest' if is_py else 'Node.js'} smoke test file "
             f"to verify that applying patch `{cand.get('summary')}` does not break syntax or module loading.\n"
@@ -107,7 +116,7 @@ def _generate_llm_or_fallback_test(state, cand, work_dir: Path, llm=None) -> dic
             f"Code excerpt:\n```\n{sample_code}\n```\n"
             "Rules: Do not make external network requests; output ONLY raw code (no markdown fences)."
         )
-        for provider in (getattr(llm, "providers", None) or [llm]):
+        for provider in (getattr(test_llm, "providers", None) or [test_llm]):
             try:
                 r = provider.step("You write concise, safe smoke tests. Output raw code only.", [{"role": "user", "content": prompt}], [])
                 txt = (r.text or "").strip()

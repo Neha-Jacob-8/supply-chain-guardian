@@ -43,6 +43,10 @@ def main():
     wt.add_argument("--rounds", type=int, default=3); wt.add_argument("--key", default=None)
     vl = sub.add_parser("verify-ledger", help="Verify cryptographic hash chain and HMAC signatures in .guardian/ledger.jsonl")
     vl.add_argument("repo"); vl.add_argument("--key", default=None)
+    wv = sub.add_parser("waive", help="Human verification bypass: waive/suppress a finding or component warning with an audit reason")
+    wv.add_argument("repo"); wv.add_argument("finding_id")
+    wv.add_argument("reason", nargs="?", default="Verified safe by human reviewer")
+    wv.add_argument("--by", default="human reviewer (CLI)"); wv.add_argument("--unwaive", action="store_true")
     sv = sub.add_parser("serve", help="HTTP API for the dashboard (needs the [api] extra)")
     sv.add_argument("--out", default="output"); sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
@@ -71,6 +75,15 @@ def main():
         from .integrity import verify_ledger
         ok, msg, _ = verify_ledger(a.repo, signing_key=a.key)
         print(msg)
+        return
+    if a.cmd == "waive":
+        from .integrity import unwaive_finding, waive_finding
+        if a.unwaive:
+            ok = unwaive_finding(a.repo, a.finding_id, by=a.by)
+            print(f"Unwaived {a.finding_id}: {ok}")
+        else:
+            entry = waive_finding(a.repo, a.finding_id, reason=a.reason, by=a.by)
+            print(f"Waived {a.finding_id} ({entry['reason']}) -> ledger {entry['ledger_hash'][:12]}")
         return
     if a.cmd in ("run", "resume"):
         import sys

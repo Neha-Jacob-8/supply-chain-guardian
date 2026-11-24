@@ -5,11 +5,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from guardian.agents.gemini import gemini_keys
 from guardian.agents.integrity_agent import IntegrityAgent
 from guardian.agents.state import RunState
 from guardian.discovery import build_inventory
 from guardian.ingestion import parse_github_url
-from guardian.integrity import append_ledger_record, check_repo_integrity, create_baseline, run_watch, verify_ledger
+from guardian.integrity import (
+    append_ledger_record, apply_waivers, check_repo_integrity, create_baseline,
+    load_waivers, run_watch, unwaive_finding, verify_ledger, waive_finding,
+)
 from guardian.intel.crawler import crawl_shadow_dependencies, dynamic_py_import_map
 from guardian.intel.osv import cvss4_score, scan_components
 from guardian.intel.registry import verify_registries
@@ -263,6 +267,83 @@ class AutoMitigateAndMergeTest(unittest.TestCase):
         self.assertTrue(res["merged"])
         self.assertEqual(res["test_info"]["kind"], "generated")
         self.assertIn("requests==2.31.0", (repo / "requirements.txt").read_text())
+
+    def test_gemini_api_for_testing_env_key_priority(self):
+        import os
+        with patch.dict(os.environ, {"GEMINI_API_KEYS": "main_key_1", "GEMINI_API_FOR_TESTING": "test_key_99"}, clear=False):
+            self.assertEqual(gemini_keys(for_testing=True)[0], "test_key_99")
+            self.assertEqual(gemini_keys(for_testing=False)[0], "main_key_1")
+
+
+class MaliciousAndPhantomShadowTest(unittest.TestCase):
+    def test_malicious_shadow_and_phantom_shadow_dependencies(self):
+        repo = Path(tempfile.mkdtemp())
+        cache = repo / "cache"
+        (cache / "osv").mkdir(parents=True)
+        (cache / "registry").mkdir(parents=True)
+
+        # requirements.txt declares flask (direct) and urllib3 (transitive via flask)
+        (repo / "requirements.txt").write_text("flask==3.0.0\n    # via -r requirements.in\nurllib3==2.2.1\n    # via flask\n")
+        # app.py imports urllib3 (phantom transitive) and evil_drain_sdk (undeclared malicious shadow)
+        (repo / "app.py").write_text("import flask\nimport urllib3\nimport evil_drain_sdk\n")
+
+        (cache / "registry" / "pypi-evil-drain-sdk.json").write_text(json.dumps({
+            "name": "evil-drain-sdk", "version": "1.0.0",
+            "releases": {"1.0.0": [{"upload_time_iso_8601": "2026-11-23T00:00:00Z"}]}
+        }))
+        mal_rec = {
+            "id": "MAL-2026-9999",
+            "summary": "Malicious exfiltration package evil-drain-sdk",
+            "aliases": [],
+            "affected": [{"package": {"ecosystem": "PyPI", "name": "evil-drain-sdk"},
+                          "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]}],
+        }
+        (cache / "osv" / "MAL-2026-9999.json").write_text(json.dumps(mal_rec))
+
+        inv = build_inventory(repo)
+        comps = inv["components"]
+        with patch("guardian.intel.osv._query_ids", return_value={"pkg:pypi/evil-drain-sdk@1.0.0": ["MAL-2026-9999"]}):
+            findings = crawl_shadow_dependencies(repo, inv, comps, cache_dir=cache, offline=True)
+
+        sc8_by_pkg = {f["evidence"]["package"]: f for f in findings if f["rule_id"] == "SC8"}
+        # 1. Phantom dependency (transitive urllib3 imported directly)
+        self.assertIn("urllib3", sc8_by_pkg)
+        self.assertEqual(sc8_by_pkg["urllib3"]["evidence"]["shadow_kind"], "phantom (transitive-only)")
+        self.assertEqual(sc8_by_pkg["urllib3"]["severity"], "MEDIUM")
+
+        # 2. Malicious shadow dependency (undeclared evil-drain-sdk with MAL-2026-9999)
+        self.assertIn("evil-drain-sdk", sc8_by_pkg)
+        self.assertEqual(sc8_by_pkg["evil-drain-sdk"]["category"], "malicious")
+        self.assertEqual(sc8_by_pkg["evil-drain-sdk"]["severity"], "CRITICAL")
+
+
+class HumanWarningBypassTest(unittest.TestCase):
+    def test_human_can_waive_and_unwaive_finding_with_ledger_audit(self):
+        repo = Path(tempfile.mkdtemp())
+        (repo / "app.py").write_text("print('ok')\n")
+        findings = [{
+            "finding_id": "SC11-abcdef1234",
+            "rule_id": "SC11",
+            "category": "suspicious",
+            "severity": "MEDIUM",
+            "title": "PyPI release fresh-pkg==0.1.0 uploaded 1d ago (< 7d)",
+            "component_id": "pkg:pypi/fresh-pkg@0.1.0",
+        }]
+        w = waive_finding(repo, "SC11-abcdef1234", reason="Verified internal release by maintainer", by="alice", signing_key="k1")
+        self.assertEqual(w["status"], "waived")
+        self.assertIn("SC11-abcdef1234", load_waivers(repo))
+
+        apply_waivers(repo, findings)
+        self.assertTrue(findings[0].get("waived"))
+        self.assertEqual(findings[0]["waiver"]["reason"], "Verified internal release by maintainer")
+
+        # Ledger chain remains valid and records the human bypass
+        ok, msg, _ = verify_ledger(repo, signing_key="k1")
+        self.assertTrue(ok)
+
+        # Unwaive restores the warning
+        self.assertTrue(unwaive_finding(repo, "SC11-abcdef1234", by="alice", signing_key="k1"))
+        self.assertNotIn("SC11-abcdef1234", load_waivers(repo))
 
 
 if __name__ == "__main__":
