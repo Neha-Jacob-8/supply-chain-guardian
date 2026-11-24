@@ -14,6 +14,7 @@ from .. import pipeline
 from ..ingestion import repository_identity
 from ..intel import risk
 from ..remediation import apply_verified, build_candidates
+from ..remediation.apply import eligible
 from ..reporting import write_report
 from ..validation import baseline_smoke, validate
 from .llm import get_llm
@@ -186,19 +187,28 @@ class Orchestrator:
                     self.decide("escalate", f"{cid} failed validation and no alternative candidate exists")
 
     def apply(self):
-        """Write verified fixes to the target repository (local branch, one commit per fix, never pushed)."""
+        """Write validated fixes to the target repository (local branch, one commit per fix, never pushed)."""
         s = self.state
         by_id = {c["candidate_id"]: c for c in s.candidates}
-        if not any(v["verdict"] == "verified" and v["candidate_id"] in by_id for v in s.validations):
+        if not any(eligible(v) and v["candidate_id"] in by_id for v in s.validations):
             return
         self._stage("apply")
         recs = apply_verified(s, by_id)
         for r in recs:
             print(f"  {r['candidate_id']}: {r['status']}  {r.get('commit') or ''} {r['detail']}")
-        not_applied = [v["candidate_id"] for v in s.validations if v["verdict"] != "verified"]
+        not_applied = [v["candidate_id"] for v in s.validations if not eligible(v)]
         if not_applied:
-            self.decide("do not apply", "only fixes with a verified verdict are written to the repository",
+            self.decide("do not apply", "failed, runtime-failing or incomplete fixes are never written to the repository",
                         candidates=not_applied)
+        if any(r["status"] == "applied" for r in recs):
+            stale = [p["candidate_id"] for p in s.proposals if s.approvals.get(p["candidate_id"], {}).get("status") == "pending"]
+            for cid in stale:
+                s.approvals[cid] = {"status": "superseded", "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                    "reason": "the repository changed when fixes were applied; re-run the analysis"}
+            if stale:
+                self.decide("supersede pending proposals", "approvals are bound to the analysed commit and the "
+                            "applied fixes created new commits; re-run the analysis for the remaining fixes",
+                            candidates=stale)
 
     def _alternative(self, cand, tried):
         risk_rank = {"low": 0, "medium": 1, "high": 2}
