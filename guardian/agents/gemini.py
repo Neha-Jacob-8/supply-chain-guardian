@@ -1,15 +1,8 @@
-"""Gemini backend (REST, standard library) with ordered key and model fallback.
+"""Gemini backend powered by the Official Google GenAI SDK (`google-genai`: `from google import genai`)
+with ordered multi-key and multi-model rotation and automatic REST fallback if the SDK package is not installed.
 
-Keys:   GEMINI_API_KEYS="k1,k2,k3" and/or GEMINI_API_KEY, GEMINI_API_KEY_1..9 (environment or .env).
+Keys:   GEMINI_API_KEYS="k1,k2,k3" and/or GEMINI_API_KEY, GEMINI_API_KEY_1..9, GEMINI_API_FOR_TESTING (environment or .env).
 Models: GUARDIAN_GEMINI_MODELS="m1,m2" (default below).
-
-For every request the backend walks keys in order and, per key, models in order:
-  400 invalid key / 401 / 403  -> the key is dropped for the rest of the run, next key
-  404 model not available       -> the model is dropped for every key, next model
-  429 quota / rate limit        -> next model, then next key
-  500 / 503 / 504 / timeout     -> one retry after a short backoff, then next model
-If every combination fails it raises LLMUnavailable, and the agent moves to the next provider or its
-labelled rule-based fallback. Keys are sent only in the x-goog-api-key header and never logged.
 """
 import json
 import os
@@ -19,8 +12,17 @@ import urllib.request
 
 from .llm import LLMUnavailable, Step, ToolUse
 
+try:
+    from google import genai
+    from google.genai import types as genai_types
+    HAS_GOOGLE_GENAI_SDK = True
+except ImportError:
+    genai = None
+    genai_types = None
+    HAS_GOOGLE_GENAI_SDK = False
+
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
+DEFAULT_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-flash-latest"]
 
 
 def gemini_keys(for_testing=False):
@@ -88,8 +90,52 @@ class GeminiLLM:
         return [{"functionDeclarations": [{"name": t["name"], "description": t.get("description", ""),
                                            "parametersJsonSchema": t["input_schema"]} for t in tools]}]
 
-    # ---------- transport with fallback ----------
+    # ---------- transport via Official Google GenAI SDK (`google.genai.Client`) ----------
+    def _sdk_call(self, key, model, body):
+        """Invoke Gemini using the official `google-genai` Python SDK (`genai.Client(api_key=key)`)."""
+        client = genai.Client(api_key=key)
+        sys_parts = ((body.get("systemInstruction") or {}).get("parts")) or []
+        sys_text = "\n".join(p.get("text", "") for p in sys_parts if p.get("text"))
+        config_kwargs = {}
+        if sys_text:
+            config_kwargs["system_instruction"] = sys_text
+        if body.get("tools"):
+            config_kwargs["tools"] = body["tools"]
+        resp = client.models.generate_content(
+            model=model,
+            contents=body.get("contents", []),
+            config=config_kwargs or None,
+        )
+        if hasattr(resp, "model_dump"):
+            return resp.model_dump(by_alias=True, exclude_none=True)
+        if hasattr(resp, "to_json_dict"):
+            return resp.to_json_dict()
+        # Normalize SDK response object into standard dict format
+        parts = []
+        cands = getattr(resp, "candidates", None) or []
+        finish = "STOP"
+        if cands:
+            c0 = cands[0]
+            finish = str(getattr(c0, "finish_reason", "STOP")).split(".")[-1]
+            for p in getattr(getattr(c0, "content", None), "parts", None) or []:
+                fc = getattr(p, "function_call", None)
+                if fc:
+                    parts.append({"functionCall": {"name": fc.name, "args": dict(fc.args or {}), "id": getattr(fc, "id", None)}})
+                elif getattr(p, "text", None):
+                    parts.append({"text": p.text})
+        um = getattr(resp, "usage_metadata", None)
+        return {
+            "candidates": [{"content": {"parts": parts}, "finishReason": finish}] if cands else [],
+            "usageMetadata": {
+                "promptTokenCount": getattr(um, "prompt_token_count", None) if um else None,
+                "candidatesTokenCount": getattr(um, "candidates_token_count", None) if um else None,
+            },
+            "modelVersion": getattr(resp, "model_version", model),
+        }
+
     def _post(self, key, model, body):
+        if HAS_GOOGLE_GENAI_SDK and genai is not None:
+            return self._sdk_call(key, model, body)
         req = urllib.request.Request(ENDPOINT.format(model=model), data=json.dumps(body).encode(),
                                      headers={"x-goog-api-key": key, "Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
@@ -108,33 +154,45 @@ class GeminiLLM:
                         data = self._post(key, model, body)
                         self.last = {"key": f"#{ki + 1}", "model": model}
                         return data, ki, model
-                    except urllib.error.HTTPError as e:
-                        try:
-                            msg = json.loads(e.read().decode()).get("error", {}).get("message", "")
-                        except Exception:
-                            msg = ""
+                    except Exception as e:
+                        if isinstance(e, LLMUnavailable):
+                            raise
+                        code = getattr(e, "code", None)
+                        if isinstance(e, urllib.error.HTTPError):
+                            try:
+                                msg = json.loads(e.read().decode()).get("error", {}).get("message", "")
+                            except Exception:
+                                msg = str(e)
+                        else:
+                            msg = getattr(e, "message", None) or str(e)
+                            if code is None:
+                                for c in (400, 401, 403, 404, 429, 500, 502, 503, 504):
+                                    if f" {c} " in f" {msg} " or msg.startswith(str(c)):
+                                        code = c
+                                        break
                         msg = msg.replace(key, "<key>")[:160]
-                        errors.append(f"key#{ki + 1}/{model}: HTTP {e.code} {msg}")
-                        if e.code in (401, 403) or (e.code == 400 and ("API key" in msg or "API_KEY" in msg)):
-                            self.dead_keys.add(key)
+                        if code is not None:
+                            errors.append(f"key#{ki + 1}/{model}: HTTP {code} {msg}")
+                            if code in (401, 403) or (code == 400 and ("API key" in msg or "API_KEY" in msg)):
+                                self.dead_keys.add(key)
+                                break
+                            if code == 404:
+                                self.dead_models.add(model)
+                                break
+                            if code == 429:
+                                break
+                            if code in (500, 502, 503, 504) and attempt == 1:
+                                time.sleep(self.backoff)
+                                continue
+                            if code == 400:
+                                raise LLMUnavailable(f"Gemini rejected the request: {msg}")
                             break
-                        if e.code == 404:
-                            self.dead_models.add(model)
+                        else:
+                            errors.append(f"key#{ki + 1}/{model}: {type(e).__name__}")
+                            if attempt == 1:
+                                time.sleep(self.backoff)
+                                continue
                             break
-                        if e.code == 429:
-                            break
-                        if e.code in (500, 502, 503, 504) and attempt == 1:
-                            time.sleep(self.backoff)
-                            continue
-                        if e.code == 400:
-                            raise LLMUnavailable(f"Gemini rejected the request: {msg}")
-                        break
-                    except (urllib.error.URLError, TimeoutError, OSError) as e:
-                        errors.append(f"key#{ki + 1}/{model}: {type(e).__name__}")
-                        if attempt == 1:
-                            time.sleep(self.backoff)
-                            continue
-                        break
         raise LLMUnavailable("all Gemini keys/models failed: " + " | ".join(errors[-6:]))
 
     def step(self, system, messages, tools):

@@ -69,6 +69,29 @@ class GeminiFallback(unittest.TestCase):
         self.assertEqual(contents[1]["parts"][0]["thoughtSignature"], "sig")      # signatures passed back unchanged
         self.assertEqual(contents[2]["parts"][0]["functionResponse"], {"name": "get_finding", "response": {"result": {"a": 1}}, "id": "c1"})
 
+    def test_official_google_genai_sdk_transport(self):
+        import guardian.agents.gemini as G
+        llm = GeminiLLM(keys=["SDK_KEY_1"], models=["gemini-2.5-flash"], backoff=0)
+        captured = {}
+
+        class FakeModels:
+            def generate_content(self, model, contents, config=None):
+                captured["model"] = model
+                captured["config"] = config
+                return mock.MagicMock(model_dump=lambda **kw: OK)
+
+        class FakeClient:
+            def __init__(self, api_key):
+                captured["api_key"] = api_key
+                self.models = FakeModels()
+
+        with mock.patch.object(G, "HAS_GOOGLE_GENAI_SDK", True), \
+                mock.patch.object(G, "genai", mock.MagicMock(Client=FakeClient)):
+            st = self.step(llm)
+        self.assertEqual(captured["api_key"], "SDK_KEY_1")
+        self.assertEqual(captured["model"], "gemini-2.5-flash")
+        self.assertEqual(st.tool_uses[0].name, "get_finding")
+
 
 if __name__ == "__main__":
     unittest.main()
