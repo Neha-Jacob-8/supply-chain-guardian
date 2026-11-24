@@ -222,15 +222,20 @@ def _check_typosquat(comp, cache_dir, offline=False):
     return None
 
 
-def detect_typosquats(comps, cache_dir, offline=False):
-    """Run multi-ecosystem API-backed typosquat detection across components in parallel."""
+def detect_typosquats(comps, cache_dir, offline=False, max_api_checks=30):
+    """Run multi-ecosystem API-backed typosquat detection across components in parallel.
+    Live API queries are bounded to direct dependencies (up to max_api_checks) so large repos
+    with 1,000+ transitive packages don't stall; remaining transitive packages still run fast
+    offline anchor checks."""
     cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
     targets = [c for c in comps.values() if c.ecosystem in OFFLINE_ANCHORS]
     if not targets:
         return []
+    direct = [c for c in targets if c.relationship == "direct"]
+    api_set = {c.component_id for c in (direct if direct else targets)[:max_api_checks]}
     out = []
     with cf.ThreadPoolExecutor(max_workers=8) as pool:
-        futs = [pool.submit(_check_typosquat, c, cache_dir, offline) for c in targets]
+        futs = [pool.submit(_check_typosquat, c, cache_dir, offline or (c.component_id not in api_set)) for c in targets]
         for fut in futs:
             try:
                 res = fut.result()

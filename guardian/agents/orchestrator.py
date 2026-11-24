@@ -252,6 +252,8 @@ class Orchestrator:
                 continue
             res = auto_mitigate_candidate(s, by_id[cid], llm=self.llm, auto_merge=auto_merge)
             s.validations = [v for v in s.validations if v["candidate_id"] != cid] + [res]
+            if not res.get("merged"):
+                s.approvals[cid] = {"status": "pending", "reason": "Auto-merge did not complete; requires human Approve / Reject"}
             results.append(res)
             print(f"  auto-mitigate {cid}: {res['verdict']} (merged={res['merged']})")
         return results

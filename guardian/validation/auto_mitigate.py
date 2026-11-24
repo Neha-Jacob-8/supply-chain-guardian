@@ -260,19 +260,28 @@ def auto_mitigate_candidate(state, cand, llm=None, auto_merge=True, save_generat
     )
 
     steps = []
-    # 1. Apply patch in sandbox
+    # 1. Apply patch in sandbox (3-way merge so sequential fixes to the same manifest file don't block each other)
+    from ..remediation.apply import _merge
+    merged_patch_files = {}
     for rel_path, (old_text, new_text) in cand.get("files", {}).items():
         target = work / rel_path
         cur = target.read_text(encoding="utf-8") if target.exists() else ""
-        if cur != old_text and cur != new_text:
-            steps.append({"name": "apply_patch", "rc": 1, "detail": f"{rel_path} differs from expected base content"})
+        if cur == old_text:
+            patched = new_text
+        elif cur == new_text:
+            patched = cur
+        else:
+            patched = _merge(cur, old_text, new_text)
+        if patched is None:
+            steps.append({"name": "apply_patch", "rc": 1, "detail": f"{rel_path} conflicts with an earlier change; manual review required"})
             return {
                 "candidate_id": cid, "summary": cand["summary"], "verdict": "failed",
                 "merged": False, "steps": steps, "test_info": None,
             }
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(new_text, encoding="utf-8")
-    steps.append({"name": "apply_patch", "rc": 0, "detail": f"Patched {len(cand.get('files', {}))} file(s) in sandbox"})
+        target.write_text(patched, encoding="utf-8")
+        merged_patch_files[rel_path] = patched
+    steps.append({"name": "apply_patch", "rc": 0, "detail": f"Patched {len(merged_patch_files)} file(s) in sandbox"})
 
     # 2. Discover existing tests or generate smoke test
     test_info = discover_existing_tests(work)
@@ -312,10 +321,10 @@ def auto_mitigate_candidate(state, cand, llm=None, auto_merge=True, save_generat
 
     # 4. Auto-merge back into target repository if tests passed
     if passed and auto_merge:
-        for rel_path, (_old_text, new_text) in cand.get("files", {}).items():
+        for rel_path, patched_text in merged_patch_files.items():
             dest = Path(state.repo) / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(new_text, encoding="utf-8")
+            dest.write_text(patched_text, encoding="utf-8")
             merged_files.append(rel_path)
 
         if save_generated_test and test_info.get("kind") == "generated" and test_info.get("code"):

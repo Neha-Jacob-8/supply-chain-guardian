@@ -405,18 +405,20 @@ function renderRemediation() {
     const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], valObj = mmap[p.candidate_id], ap = p.applied;
     const mergedChip = valObj?.merged ? chip('Auto-Merged', 'v-verified') : (ap ? chip(ap.status === 'applied' ? 'applied' : 'not applied: ' + ap.status, ap.status === 'applied' ? 'v-verified' : 'v-partial') : '');
     const testChip = valObj?.test_info ? chip(valObj.test_info.kind === 'generated' ? 'LLM/Smoke Test Generated' : 'Existing Tests', 'ghost') : '';
+    const canDecide = st === 'pending' || (verdict === 'failed' && !valObj?.merged && ap?.status !== 'applied');
     return `<div class="card ${verdict ? 'v-' + verdict : 'v-' + st}" style="--c:var(--c);animation-delay:${i * 40}ms" data-id="${esc(p.candidate_id)}">
       <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}${mergedChip}${testChip}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
       <h4>${esc(p.summary)}</h4><p style="margin:0 0 8px">${esc(p.rationale)}</p>
       <dl class="kv"><dt>Compatibility</dt><dd>${esc(p.compat_assessment)}</dd><dt>Expected</dt><dd>${esc(p.expected_risk_reduction)}${/prediction/i.test(p.expected_risk_reduction || '') ? '' : ' <span class="muted">(prediction)</span>'}</dd><dt>Rollback</dt><dd>${esc(p.rollback)}</dd></dl>
-      <div class="actions">${st === 'pending' ? `<button class="btn ok" data-a="approve">Approve</button><button class="btn no" data-a="reject">Reject</button>` : ''}<button class="btn" data-diff>View diff</button></div><div class="diffbox"></div></div>`;
+      <div class="actions">${canDecide ? `<button class="btn ok" data-a="approve">Approve</button><button class="btn no" data-a="reject">Reject</button>` : ''}<button class="btn" data-diff>View diff</button></div><div class="diffbox"></div></div>`;
   }).join('') || '<div class="empty">No remediation proposals yet.</div>';
   $('#escs').innerHTML = S.escs.length ? `<h3 class="sect">Escalated to a human</h3>${S.escs.map(e => `<div class="note">${esc(e.reason)} <span class="muted">(${e.finding_ids.length} finding${e.finding_ids.length > 1 ? 's' : ''})</span></div>`).join('')}` : '';
   $$('#props [data-a]').forEach(b => b.addEventListener('click', () => decide(b.closest('.card').dataset.id, b.dataset.a, b)));
   $$('#props [data-diff]').forEach(b => b.addEventListener('click', () => toggleDiff(b.closest('.card'))));
   const approved = S.props.filter(p => (p.approval || {}).status === 'approved' && !vmap[p.candidate_id]).length;
-  const toApply = S.props.filter(p => p.applicable && (!p.applied || p.applied.status !== 'applied')).length;
-  $('#approvedCount').textContent = `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
+  const toApply = S.props.filter(p => p.applicable && !mmap[p.candidate_id]?.merged && (!p.applied || p.applied.status !== 'applied')).length;
+  const mergedCnt = S.props.filter(p => mmap[p.candidate_id]?.merged).length;
+  $('#approvedCount').textContent = (mergedCnt ? `${mergedCnt} auto-merged · ` : '') + `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
   $('#validateBtn').disabled = !(approved || toApply) || S.status.running;
 }
 async function decide(id, decision, btn) {
@@ -449,13 +451,13 @@ function renderValidation() {
     const ti = v.test_info;
     return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || v.validated_by || '')}</span></div><div class="row2">${v.merged ? chip('Auto-Merged', 'v-verified') : ''}${chip(v.verdict, 'v-' + v.verdict)}</div></div>
       ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}${ap.validation && ap.validation !== 'verified' ? `<br><span class="muted">${esc(ap.validation)}</span>` : ''}</p>` : (!v.merged && !(S.props.find(p => p.candidate_id === v.candidate_id) || {}).applicable) ? '<p class="muted" style="margin:0 0 10px">Not applied: failed, runtime-failing or incomplete fixes are never written to the repository.</p>' : ''}
-      <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
-          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' || s.name === 'run_tests' || s.name === 'generate_smoke_test' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+      <div class="vgrid"><ul class="tl">${v.steps.map(s => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
+          ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail && s.name !== 'generate_smoke_test' ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>view log</summary><pre class="ev" style="max-height:140px">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>
           <div><span>Targets resolved</span><b>${(c.resolved || []).length}/${c.targets}</b></div><div><span>Newly introduced</span><b>${c.introduced_count}</b> ${(c.introduced_high || []).length ? chip(`${c.introduced_high.length} high`, 'sev-HIGH') : ''}</div>
           <div><span>SBOM diff</span><b>+${c.sbom_diff.added_count} / −${c.sbom_diff.removed_count}</b></div><div><span>Runtime check</span><b>${c.smoke ? runtimeLabel(c.smoke.after_ok) : '–'}</b> <span class="muted">baseline ${c.smoke ? runtimeLabel(c.smoke.baseline_ok) : '–'}</span></div></div>`
           : ti ? `<div class="nums"><div><span>Test source</span><b>${esc(ti.kind)}</b></div><div><span>Generator</span><b>${esc(ti.generator || 'existing')}</b></div><div><span>Test file</span><b class="mono">${esc((ti.files || []).join(', '))}</b></div><div><span>Auto-merged</span><b>${v.merged ? 'yes (' + (v.merged_files || []).join(', ') + ')' : 'no'}</b></div></div>
-            ${ti.code ? `<h3 class="mt">Generated Smoke Test</h3><pre class="ev">${esc(ti.code)}</pre>` : ''}`
+            ${ti.code ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">View generated smoke test (${esc((ti.files || [])[0] || '')})</summary><pre class="ev" style="max-height:180px">${esc(ti.code)}</pre></details>` : ''}`
           : '<p class="muted">Stopped before the rescan.</p>'}</div></div></div>`;
   }).join('') || '<div class="empty">No validations yet. Approve fixes under Remediation, then run independent validation.</div>';
 }
