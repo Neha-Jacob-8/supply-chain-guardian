@@ -11,7 +11,7 @@ deterministic, what is model-assisted, and what is still a limitation.
 | Vulnerability intelligence | OSV.dev | exact-version queries with affected ranges, fixed versions, aliases and evidence URLs |
 | Exploit intelligence | CISA KEV + FIRST EPSS | application-context prioritization beyond CVSS |
 | SBOM | CycloneDX 1.5 JSON | portable machine-readable inventory |
-| Agents | typed tool-use loops with Claude/Gemini providers and deterministic fallback | genuine role separation without making an LLM authoritative |
+| Agents | typed tool-use loops with Groq/Gemini/Claude providers and deterministic fallback | genuine role separation without making an LLM authoritative |
 | API/UI | FastAPI/Uvicorn plus static HTML/CSS/JS | live run, evidence, graph, matrix and approval views without a frontend build step |
 | Validation | Docker Engine/Desktop | target code is not executed on the host; lockfile generation uses `--ignore-scripts` |
 
@@ -104,6 +104,21 @@ not `verified`. Compose invocation supports either the `docker-compose` v2 plugi
 profile installs development dependencies with `--ignore-scripts` inside the running container before executing its
 unit command, because the application image is intentionally production-only.
 
+## Applying verified fixes
+
+After validation the orchestrator's **apply** stage (`guardian/remediation/apply.py`) writes approved fixes that passed
+validation to the target repository: `verified` fixes, and `partial` fixes whose only gap is missing runtime evidence
+(no trusted runtime profile) while the static rescan was clean (all targeted findings resolved, nothing new at
+high/critical). The commit and report say which. Failed, runtime-failing or incomplete fixes are never written. Fixes are
+written exactly as validated (the candidate's files plus the lockfile regenerated in the
+sandbox). In a git repository it creates a local branch `guardian/remediation-<time>` and makes one commit per fix
+(message: candidate, closed findings, approver, verdict, rollback) with git hooks disabled; it never pushes. Several
+fixes to one file are combined with a three-way merge (`git merge-file`); a fix that conflicts, or a regenerated
+lockfile that no longer matches the repository, is reported as `conflict` and left out. Files with uncommitted local
+changes are never touched (`skipped`). Because approvals are bound to the analysed commit, proposals still pending
+when fixes are applied become `superseded`; re-running the analysis rebuilds them against the fixed repository. The result is recorded in `run_state.json` (`applied`), the report and
+`output/remediation.patch` (also served at `/api/remediation.patch`).
+
 ## Report schema
 
 `report.json` has schema version `1.0` and includes the identity, run configuration/cache policy, complete inventory,
@@ -114,8 +129,9 @@ evidence was not available.
 
 ## Verification performed
 
-The repository currently passes 44 tests with the optional test dependencies installed. The suite covers parsers,
+The repository currently passes 54 tests with the optional test dependencies installed. The suite covers parsers,
 CVSS/range matching, every detector family, redaction, candidate hashing, CI permissions placement, Compose safety,
-static-only verdict semantics, missing runtime binaries, agent schemas/guardrails, and LLM request shape. `compileall`
+static-only verdict semantics, missing runtime binaries, agent schemas/guardrails, LLM request shape, and applying
+validated fixes (three-way merge, conflicts, dirty tree, npm lockfile, static-only eligibility, superseded proposals). `compileall`
 also passes. A live rule-based NodeGoat run reproduced the current inventory and produced a complete report; exact
 vulnerability counts are a time-dependent intelligence snapshot.

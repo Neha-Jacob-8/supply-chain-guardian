@@ -4,7 +4,7 @@
 
 Reads:  /api/status /api/overview /api/matrix /api/graph /api/sbom /api/findings[/{id}]
         /api/coverage /api/changes /api/investigations /api/priorities /api/proposals[/{id}]
-        /api/validations /api/evidence/{id} /api/events /api/report(.md|.json)
+        /api/validations /api/applied /api/remediation.patch /api/evidence/{id} /api/events /api/report(.md|.json)
 Writes: POST /api/runs (start a run), POST /api/proposals/{id}/approval, POST /api/resume
 Runs execute in a background thread, one at a time. Approval is the only way a fix reaches validation.
 """
@@ -149,6 +149,8 @@ def create_app(out_dir="output"):
         proposal = next((p for p in st["proposals"] if p["candidate_id"] == candidate_id), None)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
+        if st["approvals"].get(candidate_id, {}).get("status") == "superseded":
+            raise HTTPException(409, "fixes were applied since this proposal was made; re-run the analysis")
         st["approvals"][candidate_id] = {"status": "approved" if req.decision == "approve" else "rejected",
                                          "by": "human reviewer (dashboard)", "comment": req.comment,
                                          "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -345,15 +347,20 @@ def create_app(out_dir="output"):
     def changes():
         return load("lockfile_changes.json", [])
 
-    for key in ("investigations", "priorities", "validations", "escalations"):
+    for key in ("investigations", "priorities", "validations", "escalations", "applied"):
         app.add_api_route(f"/api/{key}", (lambda k: lambda: load("run_state.json", {}).get(k, []))(key), methods=["GET"])
 
     @app.get("/api/proposals")
     def proposals():
         st = load("run_state.json", {})
+        from .remediation.apply import eligible
         verdicts = {v["candidate_id"]: v["verdict"] for v in st.get("validations", [])}
+        applicable = {v["candidate_id"] for v in st.get("validations", []) if eligible(v)}
+        applied = {a["candidate_id"]: a for a in st.get("applied", [])}
         return [{k: v for k, v in p.items() if k != "diff"} | {"approval": st["approvals"].get(p["candidate_id"]),
-                                                              "verdict": verdicts.get(p["candidate_id"])}
+                                                              "verdict": verdicts.get(p["candidate_id"]),
+                                                              "applied": applied.get(p["candidate_id"]),
+                                                              "applicable": p["candidate_id"] in applicable}
                 for p in st.get("proposals", [])]
 
     @app.get("/api/proposals/{candidate_id}")
@@ -385,6 +392,13 @@ def create_app(out_dir="output"):
         p = out / "report.md"
         if not p.exists():
             raise HTTPException(404, "report not available yet")
+        return p.read_text()
+
+    @app.get("/api/remediation.patch", response_class=PlainTextResponse)
+    def remediation_patch():
+        p = out / "remediation.patch"
+        if not p.exists():
+            raise HTTPException(404, "no fix has been applied yet")
         return p.read_text()
 
     @app.get("/api/report.json")

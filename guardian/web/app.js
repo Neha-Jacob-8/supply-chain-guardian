@@ -10,7 +10,7 @@ const SEV = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 const SEVRANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const STAGES = [['discover', 'Discover'], ['investigate', 'Investigate'], ['analyze', 'Analyze'], ['remediate', 'Remediate'],
-  ['awaiting_approval', 'Approval'], ['validate', 'Validate'], ['report', 'Report'], ['done', 'Done']];
+  ['awaiting_approval', 'Approval'], ['validate', 'Validate'], ['apply', 'Apply'], ['report', 'Report'], ['done', 'Done']];
 
 async function get(path) { const r = await fetch(API + path); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.headers.get('content-type')?.includes('json') ? r.json() : r.text(); }
 async function post(path, body) {
@@ -54,7 +54,7 @@ function renderPipeline() {
     if (running && st.phase === 'cloning') cls = i === 0 ? 'active' : '';
     else if (idx >= 0) cls = i < idx || (i === idx && !running) ? 'done' : i === idx ? 'active' : '';
     if (paused && k === 'awaiting_approval') cls = 'wait';
-    if (paused && (k === 'validate' || k === 'done')) cls = '';
+    if (paused && (k === 'validate' || k === 'apply' || k === 'done')) cls = '';
     return `<div class="stage ${cls}">${String(i + 1).padStart(2, '0')} ${label}</div>`;
   }).join('');
   const mode = st.llm_mode;
@@ -402,8 +402,8 @@ function renderRemediation() {
   const pending = S.props.filter(p => (p.approval || {}).status === 'pending').length;
   $('#pendingCount').textContent = pending || '';
   $('#props').innerHTML = S.props.map((p, i) => {
-    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], valObj = mmap[p.candidate_id];
-    const mergedChip = valObj?.merged ? chip('Auto-Merged', 'v-verified') : '';
+    const st = (p.approval || {}).status || 'pending', verdict = vmap[p.candidate_id], valObj = mmap[p.candidate_id], ap = p.applied;
+    const mergedChip = valObj?.merged ? chip('Auto-Merged', 'v-verified') : (ap ? chip(ap.status === 'applied' ? 'applied' : 'not applied: ' + ap.status, ap.status === 'applied' ? 'v-verified' : 'v-partial') : '');
     const testChip = valObj?.test_info ? chip(valObj.test_info.kind === 'generated' ? 'LLM/Smoke Test Generated' : 'Existing Tests', 'ghost') : '';
     return `<div class="card ${verdict ? 'v-' + verdict : 'v-' + st}" style="--c:var(--c);animation-delay:${i * 40}ms" data-id="${esc(p.candidate_id)}">
       <div class="row2">${chip(p.change_risk + ' risk', p.change_risk === 'high' ? 'sev-HIGH' : p.change_risk === 'medium' ? 'sev-MEDIUM' : 'sev-LOW')}${chip(st, 'v-' + st)}${verdict ? chip(verdict, 'v-' + verdict) : ''}${mergedChip}${testChip}<span class="mono muted" style="font-size:11px">${esc(p.candidate_id)}</span></div>
@@ -415,8 +415,9 @@ function renderRemediation() {
   $$('#props [data-a]').forEach(b => b.addEventListener('click', () => decide(b.closest('.card').dataset.id, b.dataset.a, b)));
   $$('#props [data-diff]').forEach(b => b.addEventListener('click', () => toggleDiff(b.closest('.card'))));
   const approved = S.props.filter(p => (p.approval || {}).status === 'approved' && !vmap[p.candidate_id]).length;
-  $('#approvedCount').textContent = `${approved} approved and not yet validated`;
-  $('#validateBtn').disabled = !approved || S.status.running;
+  const toApply = S.props.filter(p => p.applicable && (!p.applied || p.applied.status !== 'applied')).length;
+  $('#approvedCount').textContent = `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
+  $('#validateBtn').disabled = !(approved || toApply) || S.status.running;
 }
 async function decide(id, decision, btn) {
   btn.disabled = true;
@@ -431,18 +432,23 @@ async function toggleDiff(card) {
   } catch (e) { box.textContent = e.message; }
 }
 $('#validateBtn').addEventListener('click', async () => {
-  try { await post('/resume', { llm: $('#llm').value }); banner('Independent validation started (Docker). This can take a few minutes per fix.', 'info'); show('validation'); poll(); }
+  try { await post('/resume', { llm: $('#llm').value }); banner('Independent validation started (Docker). This can take a few minutes per fix. Fixes that pass are then committed to a local branch of the repository.', 'info'); show('validation'); poll(); }
   catch (e) { banner(esc(e.message)); }
 });
 
 /* ---------------- validation ---------------- */
 function renderValidation() {
-  $('#vals').innerHTML = S.vals.map((v, i) => {
+  const amap = Object.fromEntries(S.props.filter(p => p.applied).map(p => [p.candidate_id, p.applied]));
+  const applied = Object.values(amap).filter(a => a.status === 'applied');
+  const head = applied.length ? `<div class="note">${applied.length} validated fix${applied.length > 1 ? 'es were' : ' was'} written to <span class="mono">${esc(S.status.repo || '')}</span>${applied[0].branch ? ` on local branch <span class="mono">${esc(applied[0].branch)}</span> (one commit per fix, not pushed)` : ''}. Re-run Analyse to continue with the remaining fixes. <a href="/api/remediation.patch" target="_blank" rel="noopener">Download patch</a></div>` : '';
+  $('#vals').innerHTML = head + S.vals.map((v, i) => {
+    const ap = amap[v.candidate_id];
     const c = v.comparison || {}, b = c.before || {}, a = c.after || {};
     const delta = (x, y) => { const d = (y ?? 0) - (x ?? 0); return d ? `<span class="${d < 0 ? 'delta-down' : 'delta-up'}">${d > 0 ? '+' : ''}${d}</span>` : '<span class="muted">±0</span>'; };
     const runtimeLabel = x => x === null || x === undefined ? 'n/a' : x ? 'pass' : 'fail';
     const ti = v.test_info;
     return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || v.validated_by || '')}</span></div><div class="row2">${v.merged ? chip('Auto-Merged', 'v-verified') : ''}${chip(v.verdict, 'v-' + v.verdict)}</div></div>
+      ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}${ap.validation && ap.validation !== 'verified' ? `<br><span class="muted">${esc(ap.validation)}</span>` : ''}</p>` : (!v.merged && !(S.props.find(p => p.candidate_id === v.candidate_id) || {}).applicable) ? '<p class="muted" style="margin:0 0 10px">Not applied: failed, runtime-failing or incomplete fixes are never written to the repository.</p>' : ''}
       <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
           ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' || s.name === 'run_tests' || s.name === 'generate_smoke_test' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>

@@ -23,7 +23,7 @@ flowchart LR
   DISC --> CRAWL[Parallel Shadow Crawler<br/>.py .js .ts .rs .java .go .rb]
   DISC --> MERKLE[4096B Merkle Baseline<br/>+ HMAC Chained Ledger]
   ORCH --> AGENTS[Attack / Integrity / Risk / Defense agents]
-  AGENTS -.->|tool use| LLM[[Official Google GenAI SDK<br/>google-genai + Claude SDK<br/>+ rule-based fallback]]
+  AGENTS -.->|tool use| LLM[[Official Google GenAI SDK<br/>google-genai + Groq + Claude SDK<br/>+ rule-based fallback]]
   AGENTS --> TOOLS[Read-only tools]
   TOOLS --> REG[(npm / PyPI / Maven Central)]
   TOOLS --> EVID[(Evidence store<br/>output/evidence/EV-*.json)]

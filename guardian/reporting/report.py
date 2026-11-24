@@ -43,6 +43,7 @@ def write(state):
             "baseline_runtime_validated": bool(baseline and baseline.get("runtime_validated")),
         },
         "cache_policy": {"offline": run_config.get("offline"), "ttl_seconds": cache_ttl_seconds()},
+        "applied": getattr(s, "applied", []),
         "lockfile_changes": s.changes, "coverage_gaps": s.gaps,
         "evidence_index": s.evidence,
         "remaining_risk": [
@@ -87,13 +88,23 @@ def write(state):
         if i.get("inferences"):
             L += ["", "**AI/heuristic inference** (not verified):"] + [f"- {x}" for x in i["inferences"]]
         L.append("")
-    L += ["## Proposed remediations", "", "| Candidate | Change | Risk | Approval | Validation |", "|---|---|---|---|---|"]
+    L += ["## Proposed remediations", "", "| Candidate | Change | Risk | Approval | Validation | Applied |",
+          "|---|---|---|---|---|---|"]
     verdicts = {v["candidate_id"]: v["verdict"] for v in s.validations}
+    applied = {a["candidate_id"]: a for a in getattr(s, "applied", [])}
     for p in s.proposals:
         ap = s.approvals.get(p["candidate_id"], {}).get("status", "pending")
-        L.append(f"| `{p['candidate_id']}` | {p['summary']} | {p['change_risk']} | {ap} | {verdicts.get(p['candidate_id'], 'not run')} |")
+        a = applied.get(p["candidate_id"])
+        L.append(f"| `{p['candidate_id']}` | {p['summary']} | {p['change_risk']} | {ap} | "
+                 f"{verdicts.get(p['candidate_id'], 'not run')} | {(a['status'] + (' ' + a['commit'] if a.get('commit') else '')) if a else 'no'} |")
     for e in getattr(s, "escalations", []):
-        L.append(f"| — | Escalated: {e['reason']} ({len(e['finding_ids'])} findings) | — | human decision | — |")
+        L.append(f"| — | Escalated: {e['reason']} ({len(e['finding_ids'])} findings) | — | human decision | — | — |")
+    if applied:
+        L += ["", "## Applied to the repository", "",
+              "Written: verified fixes, and static-only fixes whose rescan was clean (each entry says which). Failed or incomplete "
+              "fixes are never written. Local branch, one commit per fix; nothing is pushed.", ""]
+        L += [f"- `{a['candidate_id']}` **{a['status']}**{' `' + a['commit'] + '`' if a.get('commit') else ''}: "
+              f"{a['detail']}{' (' + ', '.join(a['files']) + ')' if a.get('files') else ''}" for a in applied.values()]
     if s.validations:
         L += ["", "## Validation (independent)", ""]
         bs = getattr(s, "baseline_smoke", None)

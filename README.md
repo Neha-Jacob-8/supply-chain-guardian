@@ -84,7 +84,7 @@ $$R_n = \text{SHA256}\big(n \;\|\; R_{n-1} \;\|\; \text{ CanonicalJSON}(\text{ev
 
 | Category | Tools / APIs / Standards Used | Purpose |
 |---|---|---|
-| **AI & Agent SDKs** | **Official Google GenAI SDK (`google-genai` / `google.genai`)**, **Anthropic SDK (`anthropic`)** | Multi-key/model rotation for Attack, Integrity, Risk, Defense agents + dedicated `GEMINI_API_FOR_TESTING` smoke-test generator |
+| **AI & Agent SDKs** | **Official Google GenAI SDK (`google-genai` / `google.genai`)**, **Groq API (`GROQ_API_KEYS`)**, **Anthropic SDK (`anthropic`)** | Multi-key/model rotation for Attack, Integrity, Risk, Defense agents + dedicated `GEMINI_API_FOR_TESTING` smoke-test generator |
 | **Vulnerability & Exploit Feeds** | **OSV.dev API** (`/v1/querybatch`), **CISA KEV** JSON feed, **FIRST EPSS** API (`/data/v1/epss`), **GitHub Security Advisories (`GHSA-*`)**, **OpenSSF Malicious Packages (`MAL-*`)** | Live CVE/GHSA lookup, malicious package separation, active exploitation & 30-day probability scoring |
 | **Package Registries & Insights** | **Google Open Source Insights (`api.deps.dev`)**, **npm Registry** (`registry.npmjs.org`), **PyPI JSON API** (`pypi.org/pypi/<pkg>/json`), **Maven Central Solr** (`search.maven.org`), **Crates.io**, **RubyGems**, **Packagist** | Multi-ecosystem typosquat detection (`SC9`), `404` unknown provenance (`SC10`), release-age `< 7d` diffing (`SC11`), tarball integrity verification |
 | **SBOM & Package Standards** | **CycloneDX 1.5 JSON** (`sbom.cdx.json`), **Package URL (`purl`)**, **CVSS v3.1 & v4.0**, **Subresource Integrity (SRI)** | Canonical component identification and machine-readable supply chain export |
@@ -97,8 +97,8 @@ $$R_n = \text{SHA256}\big(n \;\|\; R_{n-1} \;\|\; \text{ CanonicalJSON}(\text{ev
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
-cp .env.example .env          # set GEMINI_API_KEYS, GEMINI_API_FOR_TESTING, GUARDIAN_SIGNING_KEY
-guardian serve                # open http://127.0.0.1:8000
+cp .env.example .env          # set GROQ_API_KEYS, GEMINI_API_KEYS, GEMINI_API_FOR_TESTING, GUARDIAN_SIGNING_KEY
+guardian serve                # open http://127.0.0.1:8000, paste a GitHub URL, press Analyse
 ```
 
 ### Command Line & Live Simulation
@@ -118,7 +118,9 @@ guardian waive    targets/live-demo <finding_id> "Reviewed and accepted by secur
 python3 scripts/simulate_attacks.py targets/live-demo all
 ```
 
+Options: `--llm auto|groq|gemini|claude|none`, `--auto-merge`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static validation remains partial), `--history N` (lockfile commits to compare).
+
 ### Visual Slide Deck & Documentation
 - **[Visual Presentation Deck (PPT-Style Diagrams & Equations)](docs/presentation.md)**
 - **[System Architecture & Dataflow Charts](docs/architecture.md)**
-- **[Requirements](docs/requirements.md)** · **[Implementation](docs/implementation.md)** · **[Operations](docs/operations.md)** · **[Responsible AI](docs/responsible-ai.md)**
+- **[Requirements](docs/requirements.md)** · **[Implementation](docs/implementation.md)** · **[Operations](docs/operations.md)** · **[Responsible AI](docs/responsible-ai.md)** · **[Demo Script](docs/demo.md)**

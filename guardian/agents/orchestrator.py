@@ -1,7 +1,7 @@
 """Guardian Orchestrator: owns the workflow, the shared state and every stage transition.
 
   discover -> investigate (Attack) -> analyze (Risk) -> remediate (Defense)
-           -> awaiting_approval (human) -> validate (independent) -> report
+           -> awaiting_approval (human) -> validate (independent) -> apply (verified only) -> report
 
 Agents never call each other; they read/write RunState through the orchestrator, which records
 each handoff and decision in events.jsonl. Write permissions are enforced here: the Defense agent
@@ -13,7 +13,8 @@ import time
 from .. import pipeline
 from ..ingestion import repository_identity
 from ..intel import risk
-from ..remediation import build_candidates
+from ..remediation import apply_verified, build_candidates
+from ..remediation.apply import eligible
 from ..reporting import write_report
 from ..validation import baseline_smoke, validate
 from .llm import get_llm
@@ -170,14 +171,20 @@ class Orchestrator:
         self._stage("validate")
         s = self.state
         by_id = {c["candidate_id"]: c for c in s.candidates}
-        if self.smoke:
+        validated = {v["candidate_id"] for v in s.validations}
+        approved = [p["candidate_id"] for p in s.proposals if s.approvals.get(p["candidate_id"], {}).get("status") == "approved"
+                    and p["candidate_id"] not in validated]
+        gone = [c for c in approved if c not in by_id]
+        if gone:
+            self.decide("skip validation", "the repository changed and these fixes no longer apply", candidates=gone)
+        queue = [c for c in approved if c in by_id]
+        if queue and self.smoke:
             s.baseline_smoke = baseline_smoke(s)
             status = "pass" if s.baseline_smoke["ok"] is True else "FAIL" if s.baseline_smoke["ok"] is False else "not available"
             print(f"  baseline runtime check on unmodified app: {status}")
             if s.baseline_smoke["ok"] is False:
                 self.decide("judge smoke results relative to baseline",
                             "the unmodified app already fails to build/boot; a fix that makes it pass is an improvement")
-        queue = [p["candidate_id"] for p in s.proposals if s.approvals.get(p["candidate_id"], {}).get("status") == "approved"]
         tried = set()
         while queue:
             cid = queue.pop(0)
@@ -198,6 +205,30 @@ class Orchestrator:
                     s.approvals[alt["candidate_id"]] = {"status": "pending"}
                 else:
                     self.decide("escalate", f"{cid} failed validation and no alternative candidate exists")
+
+    def apply(self):
+        """Write validated fixes to the target repository (local branch, one commit per fix, never pushed)."""
+        s = self.state
+        by_id = {c["candidate_id"]: c for c in s.candidates}
+        if not any(eligible(v) and v["candidate_id"] in by_id for v in s.validations):
+            return
+        self._stage("apply")
+        recs = apply_verified(s, by_id)
+        for r in recs:
+            print(f"  {r['candidate_id']}: {r['status']}  {r.get('commit') or ''} {r['detail']}")
+        not_applied = [v["candidate_id"] for v in s.validations if not eligible(v)]
+        if not_applied:
+            self.decide("do not apply", "failed, runtime-failing or incomplete fixes are never written to the repository",
+                        candidates=not_applied)
+        if any(r["status"] == "applied" for r in recs):
+            stale = [p["candidate_id"] for p in s.proposals if s.approvals.get(p["candidate_id"], {}).get("status") == "pending"]
+            for cid in stale:
+                s.approvals[cid] = {"status": "superseded", "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                    "reason": "the repository changed when fixes were applied; re-run the analysis"}
+            if stale:
+                self.decide("supersede pending proposals", "approvals are bound to the analysed commit and the "
+                            "applied fixes created new commits; re-run the analysis for the remaining fixes",
+                            candidates=stale)
 
     def _alternative(self, cand, tried):
         risk_rank = {"low": 0, "medium": 1, "high": 2}
@@ -265,6 +296,7 @@ class Orchestrator:
             self.auto_mitigate(auto_merge=True)
         else:
             self.validate()
+            self.apply()
         self.finish()
 
     def resume(self):
@@ -294,9 +326,12 @@ class Orchestrator:
         s.proposals, s.approvals = saved["proposals"], saved["approvals"]
         s.risk_summary = saved.get("risk_summary", "")
         s.escalations = saved.get("escalations", [])
+        s.validations, s.applied = saved.get("validations", []), saved.get("applied", [])
+        s.baseline_smoke = saved.get("baseline_smoke")
         s.log("orchestrator", "resume", {"approved": [k for k, v in s.approvals.items() if v["status"] == "approved"]})
         if self.approval_gate() == 0:
             self.decide("stop", "still nothing approved")
             return self.finish()
         self.validate()
+        self.apply()
         self.finish()
