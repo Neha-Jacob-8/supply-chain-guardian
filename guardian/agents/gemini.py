@@ -200,8 +200,10 @@ class GeminiLLM:
         raise LLMUnavailable("all Gemini keys/models failed: " + " | ".join(errors[-6:]))
 
     def step(self, system, messages, tools):
-        body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": self._contents(messages),
-                "tools": self._tools(tools), "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}}
+        body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": self._contents(messages)}
+        if tools:
+            body["tools"] = self._tools(tools)
+            body["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
         data, ki, model = self._request(body)
         self.calls += 1
         usage = data.get("usageMetadata", {})

@@ -472,10 +472,31 @@ $('#aActor').addEventListener('input', renderEvents);
 function renderEvents() {
   const actors = [...new Set(S.events.map(e => e.actor))]; const cur = $('#aActor').value;
   $('#aActor').innerHTML = '<option value="">All actors</option>' + actors.map(a => `<option>${esc(a)}</option>`).join(''); $('#aActor').value = cur;
-  const ev = S.events.filter(e => !cur || e.actor === cur).slice(-400).reverse();
-  $('#events').innerHTML = '<tr><th>Time</th><th>Stage</th><th>Actor</th><th>Event</th><th>Detail</th></tr>' + ev.map(e => {
-    const rej = e.kind === 'submit' && e.detail && e.detail.accepted === false;
-    return `<tr ${rej ? 'style="background:color-mix(in srgb,var(--failed) 12%,transparent)"' : ''}><td>${new Date(e.t * 1000).toLocaleTimeString()}</td><td>${esc(e.stage)}</td><td>${esc(e.actor)}</td><td>${esc(e.kind)}${rej ? ' (rejected by guardrail)' : ''}</td><td style="max-width:640px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(e.detail))}</td></tr>`;
+  const ev = S.events.filter(e => !cur || e.actor === cur).slice(-400);
+  // Group consecutive events with the same (stage, actor) into one clean summary row with an evidence dropdown
+  const groups = [];
+  for (const e of ev) {
+    const last = groups[groups.length - 1];
+    if (last && last.stage === e.stage && last.actor === e.actor) {
+      last.items.push(e);
+    } else {
+      groups.push({ stage: e.stage, actor: e.actor, items: [e] });
+    }
+  }
+  $('#events').innerHTML = '<tr><th>Time</th><th>Stage</th><th>Actor</th><th>Summary &amp; Evidence</th></tr>' + groups.reverse().map(g => {
+    const last = g.items[g.items.length - 1];
+    const counts = {};
+    g.items.forEach(x => { counts[x.kind] = (counts[x.kind] || 0) + 1; });
+    const summary = Object.entries(counts).map(([k, n]) => `${n} ${k.replace(/_/g, ' ')}`).join(' · ');
+    const hasRej = g.items.some(x => x.kind === 'submit' && x.detail && x.detail.accepted === false);
+    const rowsHtml = g.items.slice().reverse().map(x => {
+      const rej = x.kind === 'submit' && x.detail && x.detail.accepted === false;
+      return `<div style="padding:3px 0;border-top:1px solid var(--border);${rej ? 'color:var(--failed)' : ''}"><b>${esc(x.kind)}</b> <span class="muted">${new Date(x.t * 1000).toLocaleTimeString()}</span> — ${esc(JSON.stringify(x.detail))}</div>`;
+    }).join('');
+    return `<tr ${hasRej ? 'style="background:color-mix(in srgb,var(--failed) 12%,transparent)"' : ''}>
+      <td style="white-space:nowrap">${new Date(last.t * 1000).toLocaleTimeString()}</td>
+      <td>${esc(g.stage)}</td><td>${esc(g.actor)}</td>
+      <td><details><summary style="cursor:pointer"><b>${esc(summary)}</b> <span class="muted">(${g.items.length} event${g.items.length > 1 ? 's' : ''})</span></summary><div style="margin-top:6px;max-height:220px;overflow:auto">${rowsHtml}</div></details></td></tr>`;
   }).join('');
 }
 
