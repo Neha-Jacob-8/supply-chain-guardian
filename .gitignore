@@ -14,3 +14,8 @@ dist/
 
 # local secrets (API keys)
 .env
+# Extra scan outputs (guardian run --out output-*)
+output-*/
+.pytest_cache/
+# Separate project cloned locally, not part of this repo
+TrustChain-AI/
