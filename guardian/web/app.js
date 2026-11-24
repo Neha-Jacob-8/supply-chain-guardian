@@ -88,8 +88,9 @@ $('#runForm').addEventListener('submit', async e => {
   const target = $('#target').value.trim();
   if (!target) { $('#target').focus(); return; }
   const auto_merge = !!$('#autoMergeToggle')?.checked;
+  const smoke = $('#dockerToggle') ? $('#dockerToggle').checked : true;
   try {
-    await post('/runs', { target, llm: $('#llm').value, auto_merge });
+    await post('/runs', { target, llm: $('#llm').value, auto_merge, smoke });
     S.events = []; S.lastT = 0; renderEvents();
     banner(auto_merge ? 'Autonomous run started: cloning, analysing, generating tests & auto-merging passing fixes…' : 'Run started: cloning and analysing…', 'info'); poll();
   } catch (err) { banner(esc(err.message)); }
@@ -439,7 +440,8 @@ async function toggleDiff(card) {
   } catch (e) { box.textContent = e.message; }
 }
 $('#validateBtn').addEventListener('click', async () => {
-  try { await post('/resume', { llm: $('#llm').value }); banner('Independent validation started (Docker). This can take a few minutes per fix. Fixes that pass are then committed to a local branch of the repository.', 'info'); show('validation'); poll(); }
+  const smoke = $('#dockerToggle') ? $('#dockerToggle').checked : true;
+  try { await post('/resume', { llm: $('#llm').value, smoke }); banner(`Independent validation started (${smoke ? 'Docker Sandbox' : 'static only'}). Fixes that pass are then committed to a local branch of the repository.`, 'info'); show('validation'); poll(); }
   catch (e) { banner(esc(e.message)); }
 });
 
