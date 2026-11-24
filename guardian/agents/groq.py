@@ -39,7 +39,7 @@ def groq_keys():
 class GroqLLM:
     name = "groq"
 
-    def __init__(self, keys=None, models=None, timeout=120, backoff=2.0, rate_wait=60.0, rate_rounds=4):
+    def __init__(self, keys=None, models=None, timeout=60, backoff=1.0, rate_wait=5.0, rate_rounds=1):
         self.keys = list(keys if keys is not None else groq_keys())
         if not self.keys:
             raise LLMUnavailable("no Groq API keys configured (GROQ_API_KEYS)")
