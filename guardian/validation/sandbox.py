@@ -10,6 +10,8 @@ Verdict: verified | partial | failed. Target code only ever runs inside containe
 """
 import hashlib
 import http.client
+import json
+import os
 import shutil
 import subprocess
 import time
@@ -207,19 +209,129 @@ def _http(method, path, body=None, port=4000):
     return r.status, r.getheader("Location"), r.read()[:200]
 
 
-def smoke_profile(state):
-    """Return a trusted runtime profile, or None for static-only validation.
+def _docker_available():
+    """Return True if the Docker CLI can talk to a running daemon."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        r = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                           capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
 
-    A repository name alone is not trusted: the configured remote identity must
-    match the profile. Generic Dockerfiles/Compose files are never executed by
-    default because they are untrusted code.
-    """
+
+def _repo_has_manifest(repo):
+    r = Path(repo)
+    if not r.is_dir():
+        return False
+    manifests = ("Dockerfile", "requirements.txt", "pyproject.toml", "package.json", "go.mod", "Cargo.toml", "pom.xml")
+    return any((r / m).exists() for m in manifests)
+
+
+def _generate_sandbox_profile(repo):
+    """Build or generate a Docker sandbox profile using GEMINI_FOR_SANDBOX (with deterministic fallback)."""
+    r = Path(repo)
+    has_dockerfile = (r / "Dockerfile").exists()
+    top_files = sorted(p.name for p in r.iterdir() if p.name not in {".git", "node_modules", ".venv", "venv"})[:40]
+    snippets = []
+    for name in ("requirements.txt", "pyproject.toml", "package.json", "Dockerfile"):
+        p = r / name
+        if p.exists() and p.is_file():
+            snippets.append(f"--- {name} ---\n" + p.read_text(errors="replace")[:1500])
+
+    dockerfile_text = None
+    smoke_cmd = None
+
+    try:
+        from ..agents.gemini import GeminiLLM, gemini_keys
+        keys = gemini_keys(for_sandbox=True)
+        if keys:
+            llm = GeminiLLM(keys=keys, models=["gemini-2.5-flash", "gemini-2.0-flash"], timeout=45)
+            prompt = (
+                "Generate a minimal, fast Docker validation setup for this repository.\n"
+                "Return ONLY valid JSON with keys \"dockerfile\" (string or null if Dockerfile already exists) "
+                "and \"smoke_command\" (a short non-blocking shell command that verifies dependencies install and core modules/tests import or pass without starting a long-running server).\n"
+                f"Top-level files: {top_files}\n" + "\n".join(snippets)
+            )
+            st = llm.step("You output only compact JSON with keys dockerfile and smoke_command.",
+                          [{"role": "user", "content": prompt}], [])
+            raw = (st.text or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            data = json.loads(raw)
+            if not has_dockerfile and isinstance(data.get("dockerfile"), str) and "FROM " in data["dockerfile"]:
+                dockerfile_text = data["dockerfile"].strip() + "\n"
+            if isinstance(data.get("smoke_command"), str) and data["smoke_command"].strip():
+                smoke_cmd = data["smoke_command"].strip()
+    except Exception:
+        pass
+
+    if not has_dockerfile and not dockerfile_text:
+        if (r / "requirements.txt").exists():
+            dockerfile_text = (
+                "FROM python:3.12-slim\n"
+                "WORKDIR /app\n"
+                "COPY requirements.txt .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "COPY . .\n"
+            )
+        elif (r / "pyproject.toml").exists():
+            dockerfile_text = (
+                "FROM python:3.12-slim\n"
+                "WORKDIR /app\n"
+                "COPY . .\n"
+                "RUN pip install --no-cache-dir .\n"
+            )
+        elif (r / "package.json").exists():
+            dockerfile_text = (
+                "FROM node:22-alpine\n"
+                "WORKDIR /app\n"
+                "COPY package*.json ./\n"
+                "RUN npm install --ignore-scripts --no-audit --no-fund\n"
+                "COPY . .\n"
+            )
+
+    if not smoke_cmd:
+        if (r / "pytest.ini").exists() or (r / "tests").is_dir():
+            smoke_cmd = "pytest -q || python -m unittest discover -s tests -t ."
+        elif (r / "requirements.txt").exists() or (r / "pyproject.toml").exists():
+            smoke_cmd = "python -m compileall -q ."
+        elif (r / "package.json").exists():
+            smoke_cmd = "node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\""
+
+    if not has_dockerfile and not dockerfile_text:
+        return None
+    return {
+        "name": "docker_sandbox (GEMINI_FOR_SANDBOX)" if not has_dockerfile else "docker_sandbox (Dockerfile)",
+        "sandbox_dockerfile": True,
+        "dockerfile": dockerfile_text,
+        "smoke_command": smoke_cmd,
+    }
+
+
+def smoke_profile(state):
+    """Return a trusted runtime profile, or a Docker sandbox profile when Docker + manifests are available."""
     names = {p.get("name") for p in (state.inventory or {}).get("projects", [])}
     for prof in load_policy("smoke_profiles.json")["profiles"]:
         allowed = set(prof.get("trusted_remote_ids", []))
         remote_id = (getattr(state, "identity", {}) or {}).get("remote_id")
         if names & set(prof["match"].get("project_names", [])) and (not allowed or remote_id in allowed):
             return prof
+
+    cached = getattr(state, "_sandbox_profile", False)
+    if cached is not False:
+        return cached
+
+    repo = getattr(state, "repo", None)
+    if repo and _repo_has_manifest(repo) and _docker_available():
+        from ..agents.gemini import gemini_keys
+        if (Path(repo) / "Dockerfile").exists() or gemini_keys(for_sandbox=True):
+            prof = _generate_sandbox_profile(repo)
+            state._sandbox_profile = prof
+            return prof
+
+    state._sandbox_profile = None
     return None
 
 
@@ -227,6 +339,31 @@ def runtime_check(work, project, prof):
     """Returns (steps, ok). ok is None when no runtime check applies."""
     if prof is None:
         return [{"name": "runtime_check", "rc": 0, "detail": "no trusted runtime profile: static only; runtime checks skipped"}], None
+    if prof.get("sandbox_dockerfile"):
+        w = Path(work)
+        steps = []
+        if not (w / "Dockerfile").exists() and prof.get("dockerfile"):
+            (w / "Dockerfile").write_text(prof["dockerfile"])
+            steps.append({"name": "generate_dockerfile", "rc": 0, "detail": "generated Dockerfile via GEMINI_FOR_SANDBOX"})
+        build = _run(["docker", "build", "-t", f"{project}:check", "."], cwd=work, timeout=300)
+        build["name"] = "docker_build"
+        steps.append(build)
+        try:
+            if build["rc"] != 0:
+                return steps, False
+            if prof.get("smoke_command"):
+                smoke = _run(
+                    ["docker", "run", "--rm", "--network=none", "--memory=1g", "--cpus=1",
+                     f"{project}:check", "sh", "-c", prof["smoke_command"]],
+                    cwd=work, timeout=120,
+                )
+                smoke["name"] = "docker_smoke"
+                smoke["detail"] = prof["smoke_command"]
+                steps.append(smoke)
+                return steps, smoke["rc"] == 0
+            return steps, True
+        finally:
+            _run(["docker", "image", "rm", "-f", f"{project}:check"], timeout=60)
     violations = compose_policy_violations(work) if prof.get("compose") else []
     if violations:
         return [{"name": "sandbox_policy", "rc": 1, "detail": "; ".join(violations[:8])}], False
@@ -320,6 +457,21 @@ def validate(state, cand, smoke=True, baseline_ok=True):
         (resolved if ok else remaining).append(f["finding_id"])
     introduced = [k for k in a_keys if k not in b_keys]
     intro_high = [k for k in introduced if SEV.get(a_keys[k].get("severity"), 0) >= 3]
+    introduced_details = [
+        {
+            "key": k,
+            "finding_id": a_keys[k].get("finding_id"),
+            "severity": a_keys[k].get("severity"),
+            "title": a_keys[k].get("title") or a_keys[k].get("summary") or k,
+        }
+        for k in (intro_high or introduced)[:20]
+    ]
+    if intro_high:
+        state.log("validation_agent", "issue_raised", {
+            "candidate_id": cand["candidate_id"],
+            "introduced_high": len(intro_high),
+            "details": introduced_details[:5],
+        })
     summary = {
         "before": {"findings": len(b_findings), "vulnerable_components": sum(c.risk_status == "vulnerable" for c in b_comps.values())},
         "after": {"findings": len(a_findings), "vulnerable_components": sum(c.risk_status == "vulnerable" for c in a_comps.values())},
@@ -327,6 +479,7 @@ def validate(state, cand, smoke=True, baseline_ok=True):
                       "added_count": len(set(a_comps) - set(b_comps)), "removed_count": len(set(b_comps) - set(a_comps))},
         "targets": len(targets), "resolved": resolved, "remaining": remaining,
         "introduced": introduced[:50], "introduced_count": len(introduced), "introduced_high": intro_high[:20],
+        "introduced_details": introduced_details,
     }
 
     smoke_ok = None

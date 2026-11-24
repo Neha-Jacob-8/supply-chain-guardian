@@ -220,6 +220,8 @@ def write(state, llm=None):
                       f"vulnerable components {c['before']['vulnerable_components']} → {c['after']['vulnerable_components']}",
                       f"- SBOM diff: +{c['sbom_diff']['added_count']} / -{c['sbom_diff']['removed_count']} components; "
                       f"newly introduced findings: {c['introduced_count']} (high/critical: {len(c['introduced_high'])})"]
+                if c.get("introduced_high"):
+                    L.append(f"- **Issue Raised:** This upgrade introduced {len(c['introduced_high'])} new HIGH/CRITICAL finding(s) and was blocked from applying.")
             L.append("")
     L += ["## Remaining risk", "",
           f"- Open findings at report time: **{len(remaining)}** ({len(vuln)} vulnerability findings and {len(ind)} indicators were observed at scan time; "
