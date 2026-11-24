@@ -21,7 +21,7 @@ flowchart LR
   DISC --> OSV[(OSV API)]
   DISC --> INTEL[(CISA KEV, FIRST EPSS)]
   ORCH --> AGENTS[Attack / Risk / Defense agents]
-  AGENTS -.->|tool use| LLM[[LLM providers<br/>Gemini keys x models, Claude,<br/>rule-based fallback]]
+  AGENTS -.->|tool use| LLM[[LLM providers<br/>Groq/Gemini keys x models, Claude,<br/>rule-based fallback]]
   AGENTS --> TOOLS[Read-only tools]
   TOOLS --> REG[(npm registry)]
   TOOLS --> EVID[(Evidence store<br/>output/evidence/EV-*.json)]

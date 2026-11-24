@@ -11,7 +11,7 @@ deterministic, what is model-assisted, and what is still a limitation.
 | Vulnerability intelligence | OSV.dev | exact-version queries with affected ranges, fixed versions, aliases and evidence URLs |
 | Exploit intelligence | CISA KEV + FIRST EPSS | application-context prioritization beyond CVSS |
 | SBOM | CycloneDX 1.5 JSON | portable machine-readable inventory |
-| Agents | typed tool-use loops with Claude/Gemini providers and deterministic fallback | genuine role separation without making an LLM authoritative |
+| Agents | typed tool-use loops with Groq/Gemini/Claude providers and deterministic fallback | genuine role separation without making an LLM authoritative |
 | API/UI | FastAPI/Uvicorn plus static HTML/CSS/JS | live run, evidence, graph, matrix and approval views without a frontend build step |
 | Validation | Docker Engine/Desktop | target code is not executed on the host; lockfile generation uses `--ignore-scripts` |
 

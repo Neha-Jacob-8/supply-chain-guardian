@@ -15,7 +15,7 @@ generated. Every fix needs human approval and independent validation.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
-cp .env.example .env          # add GEMINI_API_KEYS (and/or ANTHROPIC_API_KEY); without keys agents run rule-based
+cp .env.example .env          # add GROQ_API_KEYS, GEMINI_API_KEYS, and/or ANTHROPIC_API_KEY
 guardian serve                # open http://127.0.0.1:8000, paste a GitHub URL, press Analyse
 ```
 
@@ -28,7 +28,7 @@ guardian approve --ids FIX-...,FIX-...               # human decision (or --ids 
 guardian resume targets/NodeGoat                     # independent validation + report
 ```
 
-Options: `--llm auto|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static
+Options: `--llm auto|groq|gemini|claude|none`, `--offline` (cached data only), `--no-smoke` (skip runtime checks; static
 validation remains partial),
 `--history N` (lockfile commits to compare).
 
@@ -70,7 +70,9 @@ the above, including pnpm monorepos, an empty repository and offline runs.
 
 ## LLM providers
 
-Configured in `.env` (git-ignored). `GEMINI_API_KEYS=k1,k2,k3` are tried in order; per key, models are tried in order
+Configured in `.env` (git-ignored). `GROQ_API_KEYS=k1,k2,k3,k4` are tried in order; rate-limit/auth failures rotate
+to the next key and then the next configured model. Set `GUARDIAN_GROQ_MODELS` to override the default Groq model order.
+`GEMINI_API_KEYS=k1,k2,k3` are also tried in order; per key, models are tried in order
 (`gemini-3.5-flash` → `gemini-flash-latest` → lite models, override with `GUARDIAN_GEMINI_MODELS`). Invalid keys are
 dropped, retired models skipped, quota errors move to the next model/key, overload is retried. If every key and
 model fails, the agent restarts on the next provider (Claude, if `ANTHROPIC_API_KEY` is set) and finally runs its

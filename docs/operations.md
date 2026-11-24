@@ -7,7 +7,7 @@
 - Docker Engine/Desktop plus Docker Compose v2 (`docker compose` or the standalone `docker-compose` plugin) for
   lockfile regeneration and the allowlisted NodeGoat runtime profile.
 - Network access for a fresh OSV/registry/EPSS/KEV lookup, unless the required cache is already present.
-- Optional: an Anthropic or Gemini credential. Without credentials, all agents use labelled deterministic fallbacks.
+- Optional: Groq, Anthropic, or Gemini credentials. Without credentials, all agents use labelled deterministic fallbacks.
 
 Install from the repository root:
 
@@ -19,6 +19,19 @@ pip install -e ".[all]"
 
 The core scanner only needs PyYAML. The `all` extra adds the optional Claude SDK, FastAPI, and Uvicorn dashboard
 dependencies. Put credentials in a git-ignored `.env`; never paste them into a report or commit them.
+
+For Groq, create separate keys in the Groq console and fill the four numbered slots in `.env`:
+
+```dotenv
+GROQ_API_KEY_1=...
+GROQ_API_KEY_2=...
+GROQ_API_KEY_3=...
+GROQ_API_KEY_4=...
+```
+
+The `groq` backend rotates keys on authentication/rate-limit errors, tries the next configured model when a model is
+unavailable, retries transient service failures, and then falls back to the next provider or the labelled rule-based
+agent. Guardian cannot create Groq keys; they must be created by the account owner at `console.groq.com`.
 
 ## Day 1 scan
 
@@ -57,7 +70,7 @@ Online intelligence caches are refreshed when older than `GUARDIAN_CACHE_TTL_SEC
 guardian run https://github.com/OWASP/NodeGoat --out output --llm none --approve none
 ```
 
-Use `--llm auto` for configured providers; `--llm none` is deterministic and presentation-safe. `--approve none`
+Use `--llm auto` for configured providers, or `--llm groq` to use the Groq key pool explicitly; `--llm none` is deterministic and presentation-safe. `--approve none`
 demonstrates the approval pause without applying anything. A normal run proceeds:
 
 `discover → investigate → analyze → remediate → awaiting_approval → validate → report`

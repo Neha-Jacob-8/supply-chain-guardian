@@ -3,7 +3,8 @@
 ClaudeLLM  - Claude via the Anthropic SDK (Messages API + client tools; we own the loop so every
              tool call is logged and every submitted result is citation-checked).
 ScriptedLLM - deterministic stand-in used by unit tests.
-Credentials come from the environment (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / `ant auth login`).
+Credentials come from the environment (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
+GEMINI_API_KEYS, or GROQ_API_KEYS).
 """
 import os
 from dataclasses import dataclass, field
@@ -107,7 +108,7 @@ class ChainLLM:
 
 
 def get_llm(mode="auto"):
-    """mode: auto (every provider with credentials, Claude first), claude, gemini, none."""
+    """mode: auto (configured providers, Claude/Gemini/Groq order), or one provider/none."""
     if mode == "none":
         return None
     providers, errors = [], []
@@ -123,6 +124,13 @@ def get_llm(mode="auto"):
                 providers.append(GeminiLLM())
             except Exception as e:
                 errors.append(f"gemini: {e}")
+    if mode in ("auto", "groq"):
+        from .groq import GroqLLM, groq_keys
+        if mode == "groq" or groq_keys():
+            try:
+                providers.append(GroqLLM())
+            except Exception as e:
+                errors.append(f"groq: {e}")
     if not providers:
         if mode != "auto":
             raise LLMUnavailable("; ".join(errors) or f"{mode} is not configured")
