@@ -370,8 +370,8 @@ function renderRemediation() {
   $$('#props [data-a]').forEach(b => b.addEventListener('click', () => decide(b.closest('.card').dataset.id, b.dataset.a, b)));
   $$('#props [data-diff]').forEach(b => b.addEventListener('click', () => toggleDiff(b.closest('.card'))));
   const approved = S.props.filter(p => (p.approval || {}).status === 'approved' && !vmap[p.candidate_id]).length;
-  const toApply = S.props.filter(p => vmap[p.candidate_id] === 'verified' && (!p.applied || p.applied.status !== 'applied')).length;
-  $('#approvedCount').textContent = `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} verified and not yet applied` : '');
+  const toApply = S.props.filter(p => p.applicable && (!p.applied || p.applied.status !== 'applied')).length;
+  $('#approvedCount').textContent = `${approved} approved and not yet validated` + (toApply ? ` · ${toApply} validated and not yet applied` : '');
   $('#validateBtn').disabled = !(approved || toApply) || S.status.running;
 }
 async function decide(id, decision, btn) {
@@ -387,7 +387,7 @@ async function toggleDiff(card) {
   } catch (e) { box.textContent = e.message; }
 }
 $('#validateBtn').addEventListener('click', async () => {
-  try { await post('/resume', { llm: $('#llm').value }); banner('Independent validation started (Docker). This can take a few minutes per fix. Verified fixes are then committed to a local branch of the repository.', 'info'); show('validation'); poll(); }
+  try { await post('/resume', { llm: $('#llm').value }); banner('Independent validation started (Docker). This can take a few minutes per fix. Fixes that pass are then committed to a local branch of the repository.', 'info'); show('validation'); poll(); }
   catch (e) { banner(esc(e.message)); }
 });
 
@@ -395,14 +395,14 @@ $('#validateBtn').addEventListener('click', async () => {
 function renderValidation() {
   const amap = Object.fromEntries(S.props.filter(p => p.applied).map(p => [p.candidate_id, p.applied]));
   const applied = Object.values(amap).filter(a => a.status === 'applied');
-  const head = applied.length ? `<div class="note">${applied.length} verified fix${applied.length > 1 ? 'es were' : ' was'} written to <span class="mono">${esc(S.status.repo || '')}</span>${applied[0].branch ? ` on local branch <span class="mono">${esc(applied[0].branch)}</span> (one commit per fix, not pushed)` : ''}. <a href="/api/remediation.patch" target="_blank" rel="noopener">Download patch</a></div>` : '';
+  const head = applied.length ? `<div class="note">${applied.length} validated fix${applied.length > 1 ? 'es were' : ' was'} written to <span class="mono">${esc(S.status.repo || '')}</span>${applied[0].branch ? ` on local branch <span class="mono">${esc(applied[0].branch)}</span> (one commit per fix, not pushed)` : ''}. Re-run Analyse to continue with the remaining fixes. <a href="/api/remediation.patch" target="_blank" rel="noopener">Download patch</a></div>` : '';
   $('#vals').innerHTML = head + S.vals.map((v, i) => {
     const ap = amap[v.candidate_id];
     const c = v.comparison || {}, b = c.before || {}, a = c.after || {};
     const delta = (x, y) => { const d = (y ?? 0) - (x ?? 0); return d ? `<span class="${d < 0 ? 'delta-down' : 'delta-up'}">${d > 0 ? '+' : ''}${d}</span>` : '<span class="muted">±0</span>'; };
     const runtimeLabel = x => x === null || x === undefined ? 'n/a' : x ? 'pass' : 'fail';
     return `<div class="vcard v-${esc(v.verdict)}" style="animation-delay:${i * 60}ms"><div class="vhead"><div><h4 style="margin:0 0 4px;font-size:15px;font-weight:500">${esc(v.summary)}</h4><span class="mono muted" style="font-size:11px">${esc(v.candidate_id)} · ${esc(c.runtime_check || '')}</span></div>${chip(v.verdict, 'v-' + v.verdict)}</div>
-      ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}</p>` : v.verdict !== 'verified' ? '<p class="muted" style="margin:0 0 10px">Not applied: only verified fixes are written to the repository.</p>' : ''}
+      ${ap ? `<p class="${ap.status === 'applied' ? '' : 'muted'}" style="margin:0 0 10px">${ap.status === 'applied' ? '<b>Applied</b>' : '<b>Not applied</b>'}${ap.commit ? ` · commit <span class="mono">${esc(ap.commit)}</span>` : ''} · ${esc(ap.detail)}${ap.validation && ap.validation !== 'verified' ? `<br><span class="muted">${esc(ap.validation)}</span>` : ''}</p>` : !(S.props.find(p => p.candidate_id === v.candidate_id) || {}).applicable ? '<p class="muted" style="margin:0 0 10px">Not applied: failed, runtime-failing or incomplete fixes are never written to the repository.</p>' : ''}
       <div class="vgrid"><ul class="tl">${v.steps.map((s, j) => `<li class="${s.rc === 0 ? (s.name === 'runtime_check' || s.name === 'app_logs' ? 'neutral' : 'ok') : 'bad'}" style="animation-delay:${j * 90}ms"><b>${esc(s.name.replace(/_/g, ' '))}</b> ${s.seconds ? `<span class="muted">${s.seconds}s</span>` : ''}
           ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ''}${s.log_tail ? `<details ${s.rc !== 0 || s.name === 'app_logs' ? 'open' : ''}><summary>log</summary><pre class="ev">${esc(s.log_tail)}</pre></details>` : ''}</li>`).join('')}</ul>
         <div>${v.comparison ? `<div class="nums"><div><span>Findings</span><b>${b.findings} → ${a.findings}</b> ${delta(b.findings, a.findings)}</div><div><span>Vulnerable comps</span><b>${b.vulnerable_components} → ${a.vulnerable_components}</b> ${delta(b.vulnerable_components, a.vulnerable_components)}</div>

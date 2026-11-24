@@ -39,7 +39,7 @@ input:focus, select:focus, button:focus-visible { outline: none; border-color: v
 .chip.ghost { background: transparent; }
 .chip .dot, .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
 .sev-CRITICAL { --c: var(--critical); } .sev-HIGH { --c: var(--high); } .sev-MEDIUM { --c: var(--medium); } .sev-LOW { --c: var(--low); } .sev-UNKNOWN, .sev-NONE { --c: var(--info); }
-.v-verified { --c: var(--verified); } .v-failed { --c: var(--failed); } .v-partial { --c: var(--partial); } .v-pending, .v-rejected { --c: var(--pending); } .v-approved { --c: var(--accent); }
+.v-verified { --c: var(--verified); } .v-failed { --c: var(--failed); } .v-partial { --c: var(--partial); } .v-pending, .v-rejected, .v-superseded { --c: var(--pending); } .v-approved { --c: var(--accent); }
 .chip.c { color: var(--c); border-color: color-mix(in srgb, var(--c) 45%, var(--border)); }
 .chip.c .dot { background: var(--c); }
 .ev-verified { color: var(--verified); } .ev-indicator { color: var(--accent); } .ev-inferred { color: var(--suspicious); }
