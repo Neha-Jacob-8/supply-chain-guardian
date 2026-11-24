@@ -129,6 +129,8 @@ def create_app(out_dir="output"):
         proposal = next((p for p in st["proposals"] if p["candidate_id"] == candidate_id), None)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
+        if st["approvals"].get(candidate_id, {}).get("status") == "superseded":
+            raise HTTPException(409, "fixes were applied since this proposal was made; re-run the analysis")
         st["approvals"][candidate_id] = {"status": "approved" if req.decision == "approve" else "rejected",
                                          "by": "human reviewer (dashboard)", "comment": req.comment,
                                          "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -209,11 +211,14 @@ def create_app(out_dir="output"):
     @app.get("/api/proposals")
     def proposals():
         st = load("run_state.json", {})
+        from .remediation.apply import eligible
         verdicts = {v["candidate_id"]: v["verdict"] for v in st.get("validations", [])}
+        applicable = {v["candidate_id"] for v in st.get("validations", []) if eligible(v)}
         applied = {a["candidate_id"]: a for a in st.get("applied", [])}
         return [{k: v for k, v in p.items() if k != "diff"} | {"approval": st["approvals"].get(p["candidate_id"]),
                                                               "verdict": verdicts.get(p["candidate_id"]),
-                                                              "applied": applied.get(p["candidate_id"])}
+                                                              "applied": applied.get(p["candidate_id"]),
+                                                              "applicable": p["candidate_id"] in applicable}
                 for p in st.get("proposals", [])]
 
     @app.get("/api/proposals/{candidate_id}")
