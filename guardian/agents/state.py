@@ -8,7 +8,7 @@ from ..ingestion import repository_identity
 
 
 class RunState:
-    STAGES = ["discover", "investigate", "analyze", "remediate", "awaiting_approval", "validate", "report", "done"]
+    STAGES = ["discover", "investigate", "analyze", "remediate", "awaiting_approval", "validate", "apply", "report", "done"]
 
     def __init__(self, repo, out_dir):
         self.repo, self.out = Path(repo), Path(out_dir)
@@ -23,7 +23,7 @@ class RunState:
         self.risk, self.usage = {}, {}
         self.investigations, self.priorities = [], []
         self.candidates, self.proposals = [], []
-        self.approvals, self.validations = {}, []
+        self.approvals, self.validations, self.applied = {}, [], []
         self.evidence = {}
         self.events = []
         self.llm_mode = "none"
@@ -64,7 +64,7 @@ class RunState:
 
     def save(self):
         data = {k: getattr(self, k) for k in ("stage", "changes", "gaps", "risk", "investigations", "priorities",
-                                              "proposals", "approvals", "validations", "llm_mode",
+                                              "proposals", "approvals", "validations", "applied", "llm_mode",
                                               "risk_summary", "escalations", "baseline_smoke", "identity")}
         data["run_config"] = self.run_config
         data["repo"] = str(self.repo)
