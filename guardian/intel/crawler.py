@@ -143,28 +143,73 @@ def _installed_venv_versions(repo):
     return versions
 
 
-def _scan_py_file(path, rel, local_mods):
+def _is_local_py_import(repo: Path, file_dir: Path, dotted_module: str, local_mods: set[str]) -> bool:
+    """Return True if `dotted_module` (e.g. `guardian.agents.gemini` or `utils.helpers`)
+    resolves to an internal file or package directory inside the repository."""
+    if not dotted_module or dotted_module.startswith("."):
+        return True
+    parts = [p for p in dotted_module.split(".") if p]
+    if not parts:
+        return True
+    top = parts[0]
+    if top in PY_STDLIB or top.lower() in local_mods or top.startswith("_"):
+        return True
+    rel_path = Path(*parts)
+    for base in (repo, repo / "src", repo / "lib", repo / "app", file_dir):
+        if (
+            (base / rel_path).with_suffix(".py").is_file()
+            or (base / rel_path).is_dir()
+            or (base / top).with_suffix(".py").is_file()
+            or (base / top / "__init__.py").is_file()
+            or (base / top).is_dir()
+        ):
+            return True
+    return False
+
+
+def _scan_py_file(path, rel, local_mods, repo_root=None):
     hits = []
+    file_p = Path(path)
+    repo_p = Path(repo_root) if repo_root else file_p.parent
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = file_p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return hits
     for lineno, line in enumerate(lines, 1):
-        m = re.match(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        # Skip relative imports like `from .foo import bar` or `from ..agents import x`
+        if re.match(r"^\s*from\s+\.", line):
+            continue
+        m = re.match(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_.]*)", line)
         if not m:
             continue
-        mod = m.group(1)
-        if mod in PY_STDLIB or mod.lower() in local_mods or mod.startswith("_"):
+        dotted = m.group(1)
+        if _is_local_py_import(repo_p, file_p.parent, dotted, local_mods):
             continue
+        mod = dotted.split(".")[0]
         hits.append(("pypi", mod, rel, lineno, line.strip()[:160]))
     return hits
 
 
-def _scan_js_file(path, rel):
+def _is_local_js_import(repo: Path, file_dir: Path, spec: str) -> bool:
+    """Return True if a JS/TS bare or path specifier points to an internal file/folder in the repo."""
+    if spec.startswith((".", "/", "node:", "bun:", "deno:", "http:", "https:", "#", "~", "@/", "~/")):
+        return True
+    exts = ("", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", "/index.js", "/index.ts", "/index.tsx")
+    for base in (repo, repo / "src", repo / "lib", repo / "app", file_dir):
+        for ext in exts:
+            cand = base / (spec + ext)
+            if cand.is_file():
+                return True
+    return False
+
+
+def _scan_js_file(path, rel, repo_root=None):
     hits = []
+    file_p = Path(path)
+    repo_p = Path(repo_root) if repo_root else file_p.parent
     pat = re.compile(r"""(?:import\s+(?:[^'"]+?\s+from\s+)?|require\s*\(\s*)['"]([^'"]+)['"]""")
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = file_p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return hits
     for lineno, line in enumerate(lines, 1):
@@ -173,7 +218,7 @@ def _scan_js_file(path, rel):
         for m in pat.finditer(line):
             spec = m.group(1)
             if (
-                spec.startswith((".", "/", "node:", "bun:", "deno:", "http:", "https:", "#", "~"))
+                _is_local_js_import(repo_p, file_p.parent, spec)
                 or not re.match(r"^(?:@[a-z0-9_.\-]+/)?[a-z0-9_.\-]+(?:/[a-zA-Z0-9_.\-]+)*$", spec)
             ):
                 continue
@@ -398,8 +443,8 @@ def crawl_shadow_dependencies(repo, inv, comps, cache_dir=None, offline=False):
 
     raw_hits = []
     with cf.ThreadPoolExecutor(max_workers=8) as pool:
-        futs = [pool.submit(_scan_py_file, full, rel, local_py_mods) for full, rel in py_files]
-        futs += [pool.submit(_scan_js_file, full, rel) for full, rel in js_files]
+        futs = [pool.submit(_scan_py_file, full, rel, local_py_mods, repo) for full, rel in py_files]
+        futs += [pool.submit(_scan_js_file, full, rel, repo) for full, rel in js_files]
         futs += [pool.submit(_scan_rust_file, full, rel, local_rs_mods) for full, rel in rs_files]
         futs += [pool.submit(_scan_java_file, full, rel, local_java_pkgs) for full, rel in java_files]
         futs += [pool.submit(_scan_go_file, full, rel, go_module_prefix) for full, rel in go_files]

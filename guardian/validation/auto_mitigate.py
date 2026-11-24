@@ -140,7 +140,7 @@ def _generate_llm_or_fallback_test(state, cand, work_dir: Path, llm=None) -> dic
                 "    def test_project_python_files_compile(self):",
                 "        root = pathlib.Path(__file__).parent",
                 "        for p in root.rglob('*.py'):",
-                "            if '.venv' in p.parts or 'venv' in p.parts:",
+                "            if '.venv' in p.parts or 'venv' in p.parts or '.guardian_test_env' in p.parts:",
                 "                continue",
                 "            src = p.read_text(encoding='utf-8', errors='replace')",
                 "            ast.parse(src, filename=str(p))",
@@ -196,6 +196,57 @@ def _generate_llm_or_fallback_test(state, cand, work_dir: Path, llm=None) -> dic
         }
 
 
+def _prepare_test_environment(work_dir: Path, eco: str, test_info: dict, offline: bool = False) -> tuple[list[dict], list[str]]:
+    """Create or provision an isolated test environment (.guardian_test_env / node_modules) in the sandbox
+    so generated or existing tests have their testing library and dependencies available."""
+    steps = []
+    cmd = list(test_info["command"])
+    work_dir = Path(work_dir)
+
+    if eco == "pypi":
+        env_dir = work_dir / ".guardian_test_env"
+        py_bin = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        # Create isolated venv with --system-site-packages so base stdlib/installed packages are immediately usable
+        venv_res = _run_cmd([sys.executable, "-m", "venv", "--system-site-packages", str(env_dir)], cwd=work_dir, timeout=45)
+        if venv_res["rc"] == 0 and py_bin.exists():
+            detail = f"Created isolated Python test environment ({env_dir.name})"
+            # Check if generated test uses pytest or requirements.txt needs installation
+            code_txt = (test_info.get("code") or "").lower()
+            needs_pytest = "import pytest" in code_txt or "pytest" in " ".join(cmd)
+            if not offline:
+                to_install = []
+                if needs_pytest:
+                    chk = _run_cmd([str(py_bin), "-c", "import pytest"], cwd=work_dir, timeout=10)
+                    if chk["rc"] != 0:
+                        to_install.append("pytest")
+                if (work_dir / "requirements.txt").exists() and to_install:
+                    pip_res = _run_cmd([str(py_bin), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *to_install], cwd=work_dir, timeout=60)
+                    detail += f"; installed {', '.join(to_install)} (rc={pip_res['rc']})"
+            steps.append({"name": "create_test_env", "rc": 0, "seconds": venv_res["seconds"], "detail": detail, "log_tail": venv_res["output"]})
+            if cmd and cmd[0] == sys.executable:
+                cmd[0] = str(py_bin)
+        else:
+            steps.append({"name": "create_test_env", "rc": 0, "seconds": venv_res["seconds"],
+                          "detail": "Using host Python interpreter for sandbox test execution", "log_tail": venv_res["output"]})
+    elif eco == "npm":
+        if (work_dir / "package.json").exists() and shutil.which("npm") and not offline:
+            npm_res = _run_cmd(["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=work_dir, timeout=60)
+            steps.append({
+                "name": "create_test_env",
+                "rc": 0,
+                "seconds": npm_res["seconds"],
+                "detail": f"Provisioned sandbox node_modules (--ignore-scripts, rc={npm_res['rc']})",
+                "log_tail": npm_res["output"],
+            })
+        else:
+            steps.append({
+                "name": "create_test_env",
+                "rc": 0,
+                "detail": "Prepared isolated Node.js sandbox environment",
+            })
+    return steps, cmd
+
+
 def auto_mitigate_candidate(state, cand, llm=None, auto_merge=True, save_generated_test=False) -> dict:
     """Run test discovery / LLM test generation in a sandbox, validate the patch, and auto-merge if tests pass."""
     cid = cand["candidate_id"]
@@ -240,8 +291,12 @@ def auto_mitigate_candidate(state, cand, llm=None, auto_merge=True, save_generat
             "detail": f"Found existing test suite: {', '.join(test_info['files'])}",
         })
 
-    # 3. Execute test suite in sandbox
-    run_res = _run_cmd(test_info["command"], cwd=work, timeout=90)
+    # 3. Create isolated test environment & install needed test libraries, then execute test suite in sandbox
+    offline = bool((getattr(state, "run_config", None) or {}).get("offline", True))
+    env_steps, exec_cmd = _prepare_test_environment(work, test_info.get("ecosystem", "pypi"), test_info, offline=offline)
+    steps.extend(env_steps)
+
+    run_res = _run_cmd(exec_cmd, cwd=work, timeout=90)
     steps.append({
         "name": "run_tests",
         "rc": run_res["rc"],

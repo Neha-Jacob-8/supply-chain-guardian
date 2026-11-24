@@ -195,6 +195,30 @@ class ShadowCrawlerAndDynamicImportTest(unittest.TestCase):
         self.assertIn("pom.xml", shdw_summaries)
         self.assertIn("go.mod", shdw_summaries)
 
+    def test_crawler_ignores_internal_dotted_package_imports(self):
+        repo = Path(tempfile.mkdtemp())
+        (repo / "requirements.txt").write_text("pyyaml==6.0.1\n")
+        # Create internal package tree: guardian/agents/gemini.py and guardian/agents/llm.py
+        (repo / "guardian" / "agents").mkdir(parents=True)
+        (repo / "guardian" / "__init__.py").write_text("")
+        (repo / "guardian" / "agents" / "__init__.py").write_text("")
+        (repo / "guardian" / "agents" / "gemini.py").write_text("class GeminiLLM:\n    pass\n")
+        (repo / "guardian" / "agents" / "llm.py").write_text("class LLMUnavailable(Exception):\n    pass\n")
+        # File importing internal dotted modules + 1 real external shadow dependency (requests)
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_internal.py").write_text(
+            "from guardian.agents.gemini import GeminiLLM\n"
+            "from guardian.agents.llm import LLMUnavailable\n"
+            "from . import something_relative\n"
+            "import requests\n"
+        )
+        inv = build_inventory(repo)
+        comps = inv["components"]
+        findings = crawl_shadow_dependencies(repo, inv, comps, cache_dir=repo / "cache", offline=True)
+        flagged_pkgs = [f["evidence"]["package"] for f in findings if f["rule_id"] == "SC8"]
+        self.assertNotIn("guardian", flagged_pkgs)
+        self.assertEqual(flagged_pkgs, ["requests"])
+
 
 class MerkleIntegrityAndLedgerTest(unittest.TestCase):
     def test_merkle_chunk_tamper_and_integrity_agent(self):
@@ -266,6 +290,7 @@ class AutoMitigateAndMergeTest(unittest.TestCase):
         self.assertEqual(res["verdict"], "verified")
         self.assertTrue(res["merged"])
         self.assertEqual(res["test_info"]["kind"], "generated")
+        self.assertTrue(any(s["name"] == "create_test_env" for s in res["steps"]))
         self.assertIn("requests==2.31.0", (repo / "requirements.txt").read_text())
 
     def test_gemini_api_for_testing_env_key_priority(self):
